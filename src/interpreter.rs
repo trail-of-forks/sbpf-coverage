@@ -159,11 +159,14 @@ impl<'a, 'b, C: ContextObject> Interpreter<'a, 'b, C> {
     pub fn step(&mut self) -> bool {
         let config = &self.executable.get_config();
 
+        if config.enable_instruction_meter && self.vm.due_insn_count >= self.vm.previous_instruction_meter {
+            throw_error!(self, EbpfError::ExceededMaxInstructions);
+        }
         self.vm.due_insn_count += 1;
-        let mut next_pc = self.reg[11] + 1;
-        if next_pc as usize * ebpf::INSN_SIZE > self.program.len() {
+        if self.reg[11] as usize * ebpf::INSN_SIZE >= self.program.len() {
             throw_error!(self, EbpfError::ExecutionOverrun);
         }
+        let mut next_pc = self.reg[11] + 1;
         let mut insn = ebpf::get_insn_unchecked(self.program, self.reg[11] as usize);
         let dst = insn.dst as usize;
         let src = insn.src as usize;
