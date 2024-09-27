@@ -217,7 +217,7 @@ const REGISTER_PTR_TO_VM: u8 = ARGUMENT_REGISTERS[0];
 /// RBX: Program counter limit
 const REGISTER_INSTRUCTION_METER: u8 = CALLEE_SAVED_REGISTERS[1];
 /// R10: Other scratch register
-const REGISTER_OTHER_SCRATCH: u8 = CALLER_SAVED_REGISTERS[7];
+// const REGISTER_OTHER_SCRATCH: u8 = CALLER_SAVED_REGISTERS[7];
 /// R11: Scratch register
 const REGISTER_SCRATCH: u8 = CALLER_SAVED_REGISTERS[8];
 
@@ -974,7 +974,10 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 Value::RegisterIndirect(reg, offset, user_provided) => {
                     debug_assert!(!user_provided);
                     if is_stack_argument {
+                        debug_assert_ne!(reg, RSP);
                         self.emit_ins(X86Instruction::push(reg, Some(X86IndirectAccess::Offset(offset))));
+                    } else if reg == RSP {
+                        self.emit_ins(X86Instruction::load(OperandSize::S64, RSP, dst, X86IndirectAccess::OffsetIndexShift(offset, RSP, 0)));
                     } else {
                         self.emit_ins(X86Instruction::load(OperandSize::S64, reg, dst, X86IndirectAccess::Offset(offset)));
                     }
@@ -984,6 +987,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     if is_stack_argument {
                         self.emit_ins(X86Instruction::push(reg, None));
                         self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 0, RSP, offset as i64, Some(X86IndirectAccess::OffsetIndexShift(0, RSP, 0))));
+                    } else if reg == RSP {
+                        self.emit_ins(X86Instruction::lea(OperandSize::S64, RSP, dst, Some(X86IndirectAccess::OffsetIndexShift(offset, RSP, 0))));
                     } else {
                         self.emit_ins(X86Instruction::lea(OperandSize::S64, reg, dst, Some(X86IndirectAccess::Offset(offset))));
                     }
@@ -1078,6 +1083,22 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
     fn emit_address_translation(&mut self, dst: Option<u8>, vm_addr: Value, len: u64, value: Option<Value>) {
         debug_assert_ne!(dst.is_some(), value.is_some());
 
+        let stack_slot_of_value_to_store = X86IndirectAccess::OffsetIndexShift(-112, RSP, 0);
+        match value {
+            Some(Value::Register(reg)) => {
+                self.emit_ins(X86Instruction::store(OperandSize::S64, reg, RSP, stack_slot_of_value_to_store));
+            }
+            Some(Value::Constant64(constant, user_provided)) => {
+                if user_provided && self.should_sanitize_constant(constant) {
+                    self.emit_sanitized_load_immediate(OperandSize::S64, REGISTER_SCRATCH, constant);
+                } else {
+                    self.emit_ins(X86Instruction::load_immediate(OperandSize::S64, REGISTER_SCRATCH, constant));
+                }
+                self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_SCRATCH, RSP, stack_slot_of_value_to_store));
+            }
+            _ => {}
+        }
+
         match vm_addr {
             Value::RegisterPlusConstant64(reg, constant, user_provided) => {
                 if user_provided && self.should_sanitize_constant(constant) {
@@ -1100,20 +1121,6 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             },
         }
 
-        match value {
-            Some(Value::Register(reg)) => {
-                self.emit_ins(X86Instruction::mov(OperandSize::S64, reg, REGISTER_OTHER_SCRATCH));
-            }
-            Some(Value::Constant64(constant, user_provided)) => {
-                if user_provided && self.should_sanitize_constant(constant) {
-                    self.emit_sanitized_load_immediate(OperandSize::S64, REGISTER_OTHER_SCRATCH, constant);
-                } else {
-                    self.emit_ins(X86Instruction::load_immediate(OperandSize::S64, REGISTER_OTHER_SCRATCH, constant));
-                }
-            }
-            _ => {}
-        }
-
         if self.config.enable_address_translation {
             let access_type = if value.is_none() { AccessType::Load } else { AccessType::Store };
             let anchor = ANCHOR_TRANSLATE_MEMORY_ADDRESS + len.trailing_zeros() as usize + 4 * (access_type as usize);
@@ -1131,13 +1138,15 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 _ => unreachable!(),
             }
         } else {
+            self.emit_ins(X86Instruction::xchg(OperandSize::S64, RSP, REGISTER_MAP[0], Some(stack_slot_of_value_to_store))); // Save REGISTER_MAP[0] and retrieve value to store
             match len {
-                1 => self.emit_ins(X86Instruction::store(OperandSize::S8, REGISTER_OTHER_SCRATCH, REGISTER_SCRATCH, X86IndirectAccess::Offset(0))),
-                2 => self.emit_ins(X86Instruction::store(OperandSize::S16, REGISTER_OTHER_SCRATCH, REGISTER_SCRATCH, X86IndirectAccess::Offset(0))),
-                4 => self.emit_ins(X86Instruction::store(OperandSize::S32, REGISTER_OTHER_SCRATCH, REGISTER_SCRATCH, X86IndirectAccess::Offset(0))),
-                8 => self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_OTHER_SCRATCH, REGISTER_SCRATCH, X86IndirectAccess::Offset(0))),
+                1 => self.emit_ins(X86Instruction::store(OperandSize::S8, REGISTER_MAP[0], REGISTER_SCRATCH, X86IndirectAccess::Offset(0))),
+                2 => self.emit_ins(X86Instruction::store(OperandSize::S16, REGISTER_MAP[0], REGISTER_SCRATCH, X86IndirectAccess::Offset(0))),
+                4 => self.emit_ins(X86Instruction::store(OperandSize::S32, REGISTER_MAP[0], REGISTER_SCRATCH, X86IndirectAccess::Offset(0))),
+                8 => self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_MAP[0], REGISTER_SCRATCH, X86IndirectAccess::Offset(0))),
                 _ => unreachable!(),
             }
+            self.emit_ins(X86Instruction::xchg(OperandSize::S64, RSP, REGISTER_MAP[0], Some(stack_slot_of_value_to_store))); // Restore REGISTER_MAP[0]
         }
     }
 
@@ -1549,7 +1558,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 };
                 self.emit_rust_call(Value::Constant64(store, false), &[
                     Argument { index: 3, value: Value::Register(REGISTER_SCRATCH) }, // Specify first as the src register could be overwritten by other arguments
-                    Argument { index: 2, value: Value::Register(REGISTER_OTHER_SCRATCH) },
+                    Argument { index: 2, value: Value::RegisterIndirect(RSP, -8, false) },
                     Argument { index: 4, value: Value::Constant64(0, false) }, // self.pc is set later
                     Argument { index: 1, value: Value::RegisterPlusConstant32(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::MemoryMapping), false) },
                     Argument { index: 0, value: Value::RegisterPlusConstant32(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult), false) },
