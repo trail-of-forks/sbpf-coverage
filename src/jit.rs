@@ -112,27 +112,29 @@ impl JitProgram {
                 "push rbx",
                 "push rbp",
                 "mov [{host_stack_pointer}], rsp",
-                "add QWORD PTR [{host_stack_pointer}], -8", // We will push RIP in "call r10" later
-                "mov rbx, rax",
+                "add QWORD PTR [{host_stack_pointer}], -8",
+                // RBP is zeroed out in order not to compromise the runtime environment (RDI) encryption.
+                "xor rbp, rbp",
+                "mov [rsp-8], rax",
                 "mov rax, [r11 + 0x00]",
                 "mov rsi, [r11 + 0x08]",
                 "mov rdx, [r11 + 0x10]",
                 "mov rcx, [r11 + 0x18]",
                 "mov r8,  [r11 + 0x20]",
                 "mov r9,  [r11 + 0x28]",
-                "mov r12, [r11 + 0x30]",
-                "mov r13, [r11 + 0x38]",
-                "mov r14, [r11 + 0x40]",
-                "mov r15, [r11 + 0x48]",
-                "mov rbp, [r11 + 0x50]",
+                "mov rbx, [r11 + 0x30]",
+                "mov r12, [r11 + 0x38]",
+                "mov r13, [r11 + 0x40]",
+                "mov r14, [r11 + 0x48]",
+                "mov r15, [r11 + 0x50]",
                 "mov r11, [r11 + 0x58]",
-                "call r10",
+                "call [rsp-8]",
                 "pop rbp",
                 "pop rbx",
                 host_stack_pointer = in(reg) &mut vm.host_stack_pointer,
                 inlateout("rdi") std::ptr::addr_of_mut!(*vm).cast::<u64>().offset(get_runtime_environment_key() as isize) => _,
-                inlateout("rax") (vm.previous_instruction_meter as i64).wrapping_add(registers[11] as i64) => _,
-                inlateout("r10") self.pc_section[registers[11] as usize] => _,
+                inlateout("r10") (vm.previous_instruction_meter as i64).wrapping_add(registers[11] as i64) => _,
+                inlateout("rax") self.pc_section[registers[11] as usize] => _,
                 inlateout("r11") &registers => _,
                 lateout("rsi") _, lateout("rdx") _, lateout("rcx") _, lateout("r8") _,
                 lateout("r9") _, lateout("r12") _, lateout("r13") _, lateout("r14") _, lateout("r15") _,
@@ -205,19 +207,17 @@ const REGISTER_MAP: [u8; 11] = [
     ARGUMENT_REGISTERS[3],     // RCX
     ARGUMENT_REGISTERS[4],     // R8
     ARGUMENT_REGISTERS[5],     // R9
+    CALLEE_SAVED_REGISTERS[1], // RBX
     CALLEE_SAVED_REGISTERS[2], // R12
     CALLEE_SAVED_REGISTERS[3], // R13
     CALLEE_SAVED_REGISTERS[4], // R14
     CALLEE_SAVED_REGISTERS[5], // R15
-    CALLEE_SAVED_REGISTERS[0], // RBP
 ];
 
 /// RDI: Used together with slot_in_vm()
 const REGISTER_PTR_TO_VM: u8 = ARGUMENT_REGISTERS[0];
-/// RBX: Program counter limit
-const REGISTER_INSTRUCTION_METER: u8 = CALLEE_SAVED_REGISTERS[1];
-/// R10: Other scratch register
-// const REGISTER_OTHER_SCRATCH: u8 = CALLER_SAVED_REGISTERS[7];
+/// R10: Program counter limit
+const REGISTER_INSTRUCTION_METER: u8 = CALLER_SAVED_REGISTERS[7];
 /// R11: Scratch register
 const REGISTER_SCRATCH: u8 = CALLER_SAVED_REGISTERS[8];
 
