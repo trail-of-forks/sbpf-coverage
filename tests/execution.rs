@@ -2315,11 +2315,16 @@ fn test_err_mem_access_out_of_bound() {
 
 #[test]
 fn test_relative_call() {
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V1..=SBPFVersion::V1,
+        ..Config::default()
+    };
     test_interpreter_and_jit_elf!(
-        "tests/elfs/relative_call.so",
+        "tests/elfs/relative_call_sbpfv1.so",
+        config,
         [1],
         (),
-        TestContextObject::new(18),
+        TestContextObject::new(16),
         ProgramResult::Ok(3),
     );
 }
@@ -2994,7 +2999,6 @@ fn test_err_call_unresolved() {
         enabled_sbpf_versions: SBPFVersion::V1..=SBPFVersion::V1,
         ..Config::default()
     };
-
     test_interpreter_and_jit_asm!(
         "
         mov r1, 1
@@ -3015,63 +3019,19 @@ fn test_err_call_unresolved() {
 
 #[test]
 fn test_syscall_reloc_64_32() {
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V1..=SBPFVersion::V1,
+        ..Config::default()
+    };
     test_interpreter_and_jit_elf!(
-        "tests/elfs/syscall_reloc_64_32.so",
+        "tests/elfs/syscall_reloc_64_32_sbpfv1.so",
+        config,
         [],
         (
             "log" => syscalls::SyscallString::vm,
         ),
         TestContextObject::new(5),
         ProgramResult::Ok(0),
-    );
-}
-
-#[test]
-fn test_syscall_static() {
-    test_interpreter_and_jit_elf!(
-        "tests/elfs/syscall_static.so",
-        [],
-        (
-            "log" => syscalls::SyscallString::vm,
-        ),
-        TestContextObject::new(6),
-        ProgramResult::Ok(0),
-    );
-}
-
-#[test]
-fn test_err_unresolved_syscall_reloc_64_32() {
-    let loader = BuiltinProgram::new_loader(
-        Config {
-            reject_broken_elfs: true,
-            ..Config::default()
-        },
-        FunctionRegistry::default(),
-    );
-    let mut file = File::open("tests/elfs/syscall_reloc_64_32.so").unwrap();
-    let mut elf = Vec::new();
-    file.read_to_end(&mut elf).unwrap();
-    assert_error!(
-        Executable::<TestContextObject>::from_elf(&elf, Arc::new(loader)),
-        "UnresolvedSymbol(\"log\", 39, 312)"
-    );
-}
-
-#[test]
-fn test_err_unresolved_syscall_static() {
-    let config = Config {
-        enable_instruction_tracing: true,
-        ..Config::default()
-    };
-    // This case only works if we skip verification.
-    test_interpreter_and_jit_elf!(
-        false,
-        "tests/elfs/syscall_static.so",
-        config,
-        [],
-        (),
-        TestContextObject::new(4),
-        ProgramResult::Err(EbpfError::UnsupportedInstruction),
     );
 }
 
@@ -3090,46 +3050,22 @@ fn test_reloc_64_64_sbpfv1() {
 }
 
 #[test]
-fn test_reloc_64_64() {
-    // Same as test_reloc_64_64, but with .text already alinged to
-    // MM_PROGRAM_START by the linker
-    //   [ 1] .text             PROGBITS        0000000100000000 001000 000018 00  AX  0   0  8
-    test_interpreter_and_jit_elf!(
-        "tests/elfs/reloc_64_64.so",
-        [],
-        (),
-        TestContextObject::new(3),
-        ProgramResult::Ok(ebpf::MM_PROGRAM_START),
-    );
-}
-
-#[test]
 fn test_reloc_64_relative_sbpfv1() {
     // Tests the correctness of R_BPF_64_RELATIVE relocations. The program
     // returns the address of the first .rodata byte.
     //   [ 1] .text             PROGBITS        0000000000000120 000120 000018 00  AX  0   0  8
     //   [ 2] .rodata           PROGBITS        0000000000000138 000138 00000a 01 AMS  0   0  1
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V1..=SBPFVersion::V1,
+        ..Config::default()
+    };
     test_interpreter_and_jit_elf!(
         "tests/elfs/reloc_64_relative_sbpfv1.so",
+        config,
         [],
         (),
         TestContextObject::new(2),
         ProgramResult::Ok(ebpf::MM_PROGRAM_START + 0x138),
-    );
-}
-
-#[test]
-fn test_reloc_64_relative() {
-    // Same as test_reloc_64_relative, but with .text placed already within
-    // MM_PROGRAM_START by the linker
-    // [ 1] .text             PROGBITS        0000000100000000 001000 000018 00  AX  0   0  8
-    // [ 2] .rodata           PROGBITS        0000000100000018 001018 00000b 01 AMS  0   0  1
-    test_interpreter_and_jit_elf!(
-        "tests/elfs/reloc_64_relative.so",
-        [],
-        (),
-        TestContextObject::new(3),
-        ProgramResult::Ok(ebpf::MM_PROGRAM_START + 0x18),
     );
 }
 
@@ -3142,30 +3078,17 @@ fn test_reloc_64_relative_data_sbfv1() {
     //
     // 00000000000001f8 <FILE>:
     // 63:       08 01 00 00 00 00 00 00
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V1..=SBPFVersion::V1,
+        ..Config::default()
+    };
     test_interpreter_and_jit_elf!(
         "tests/elfs/reloc_64_relative_data_sbpfv1.so",
+        config,
         [],
         (),
         TestContextObject::new(3),
         ProgramResult::Ok(ebpf::MM_PROGRAM_START + 0x108),
-    );
-}
-
-#[test]
-fn test_reloc_64_relative_data() {
-    // Same as test_reloc_64_relative_data, but with rodata already placed
-    // within MM_PROGRAM_START by the linker
-    // [ 1] .text             PROGBITS        0000000100000000 001000 000020 00  AX  0   0  8
-    // [ 2] .rodata           PROGBITS        0000000100000020 001020 000019 01 AMS  0   0  1
-    //
-    // 0000000100000110 <FILE>:
-    // 536870946:      20 00 00 00 01 00 00 00
-    test_interpreter_and_jit_elf!(
-        "tests/elfs/reloc_64_relative_data.so",
-        [],
-        (),
-        TestContextObject::new(4),
-        ProgramResult::Ok(ebpf::MM_PROGRAM_START + 0x20),
     );
 }
 
@@ -3184,8 +3107,13 @@ fn test_reloc_64_relative_data_sbpfv1() {
     //
     // 00000000000001f8 <FILE>:
     // 63:       00 00 00 00 08 01 00 00
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V1..=SBPFVersion::V1,
+        ..Config::default()
+    };
     test_interpreter_and_jit_elf!(
         "tests/elfs/reloc_64_relative_data_sbpfv1.so",
+        config,
         [],
         (),
         TestContextObject::new(3),
@@ -3194,24 +3122,9 @@ fn test_reloc_64_relative_data_sbpfv1() {
 }
 
 #[test]
-fn test_load_elf_rodata() {
-    let config = Config {
-        optimize_rodata: true,
-        ..Config::default()
-    };
-    test_interpreter_and_jit_elf!(
-        "tests/elfs/rodata_section.so",
-        config,
-        [],
-        (),
-        TestContextObject::new(4),
-        ProgramResult::Ok(42),
-    );
-}
-
-#[test]
 fn test_load_elf_rodata_sbpfv1() {
     let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V1..=SBPFVersion::V1,
         optimize_rodata: false,
         ..Config::default()
     };
@@ -3222,6 +3135,25 @@ fn test_load_elf_rodata_sbpfv1() {
         (),
         TestContextObject::new(3),
         ProgramResult::Ok(42),
+    );
+}
+
+#[test]
+fn test_struct_func_pointer() {
+    // This tests checks that a struct field adjacent to another field
+    // which is a relocatable function pointer is not overwritten when
+    // the function pointer is relocated at load time.
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V1..=SBPFVersion::V1,
+        ..Config::default()
+    };
+    test_interpreter_and_jit_elf!(
+        "tests/elfs/struct_func_pointer_sbpfv1.so",
+        config,
+        [],
+        (),
+        TestContextObject::new(2),
+        ProgramResult::Ok(0x102030405060708),
     );
 }
 
@@ -3430,20 +3362,6 @@ fn test_tcp_sack_nomatch() {
         (),
         TestContextObject::new(55),
         ProgramResult::Ok(0x0),
-    );
-}
-
-#[test]
-fn test_struct_func_pointer() {
-    // This tests checks that a struct field adjacent to another field
-    // which is a relocatable function pointer is not overwritten when
-    // the function pointer is relocated at load time.
-    test_interpreter_and_jit_elf!(
-        "tests/elfs/struct_func_pointer.so",
-        [],
-        (),
-        TestContextObject::new(3),
-        ProgramResult::Ok(0x102030405060708),
     );
 }
 
