@@ -8,8 +8,8 @@
 //! This module translates eBPF assembly language to binary.
 
 use self::InstructionType::{
-    AluBinary, AluUnary, CallImm, CallReg, Endian, JumpConditional, JumpUnconditional, LoadAbs,
-    LoadDwImm, LoadInd, LoadReg, NoOperand, StoreImm, StoreReg, Syscall,
+    AluBinary, AluUnary, CallImm, CallReg, Endian, JumpConditional, JumpUnconditional, LoadDwImm,
+    LoadReg, NoOperand, StoreImm, StoreReg, Syscall,
 };
 use crate::{
     asm_parser::{
@@ -19,7 +19,7 @@ use crate::{
     },
     ebpf::{self, Insn},
     elf::Executable,
-    program::{BuiltinProgram, FunctionRegistry},
+    program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
     vm::ContextObject,
 };
 use std::collections::HashMap;
@@ -35,8 +35,6 @@ enum InstructionType {
     AluBinary,
     AluUnary,
     LoadDwImm,
-    LoadAbs,
-    LoadInd,
     LoadReg,
     StoreImm,
     StoreReg,
@@ -49,7 +47,7 @@ enum InstructionType {
     NoOperand,
 }
 
-fn make_instruction_map() -> HashMap<String, (InstructionType, u8)> {
+fn make_instruction_map(sbpf_version: &SBPFVersion) -> HashMap<String, (InstructionType, u8)> {
     let mut result = HashMap::new();
 
     let alu_binary_ops = [
@@ -68,11 +66,31 @@ fn make_instruction_map() -> HashMap<String, (InstructionType, u8)> {
         ("hor", ebpf::BPF_HOR),
     ];
 
+    let mem_classes = [
+        (
+            "ldx",
+            LoadReg,
+            ebpf::BPF_MEM | ebpf::BPF_LDX,
+            ebpf::BPF_ALU32_LOAD | ebpf::BPF_X,
+        ),
+        (
+            "st",
+            StoreImm,
+            ebpf::BPF_MEM | ebpf::BPF_ST,
+            ebpf::BPF_ALU64_STORE | ebpf::BPF_K,
+        ),
+        (
+            "stx",
+            StoreReg,
+            ebpf::BPF_MEM | ebpf::BPF_STX,
+            ebpf::BPF_ALU64_STORE | ebpf::BPF_X,
+        ),
+    ];
     let mem_sizes = [
-        ("w", ebpf::BPF_W),
-        ("h", ebpf::BPF_H),
-        ("b", ebpf::BPF_B),
-        ("dw", ebpf::BPF_DW),
+        ("b", ebpf::BPF_B, ebpf::BPF_1B),
+        ("h", ebpf::BPF_H, ebpf::BPF_2B),
+        ("w", ebpf::BPF_W, ebpf::BPF_4B),
+        ("dw", ebpf::BPF_DW, ebpf::BPF_8B),
     ];
 
     let jump_conditions = [
@@ -109,9 +127,9 @@ fn make_instruction_map() -> HashMap<String, (InstructionType, u8)> {
 
         // AluBinary.
         for &(name, opc) in &alu_binary_ops {
-            entry(name, AluBinary, ebpf::BPF_ALU64 | opc);
-            entry(&format!("{name}32"), AluBinary, ebpf::BPF_ALU | opc);
-            entry(&format!("{name}64"), AluBinary, ebpf::BPF_ALU64 | opc);
+            entry(name, AluBinary, ebpf::BPF_ALU64_STORE | opc);
+            entry(&format!("{name}32"), AluBinary, ebpf::BPF_ALU32_LOAD | opc);
+            entry(&format!("{name}64"), AluBinary, ebpf::BPF_ALU64_STORE | opc);
         }
 
         // Product Quotient Remainder.
@@ -136,7 +154,6 @@ fn make_instruction_map() -> HashMap<String, (InstructionType, u8)> {
             AluBinary,
             ebpf::BPF_PQR | ebpf::BPF_B | ebpf::BPF_UHMUL,
         );
-        entry("uhmul32", AluBinary, ebpf::BPF_PQR | ebpf::BPF_UHMUL);
         entry(
             "shmul",
             AluBinary,
@@ -147,7 +164,6 @@ fn make_instruction_map() -> HashMap<String, (InstructionType, u8)> {
             AluBinary,
             ebpf::BPF_PQR | ebpf::BPF_B | ebpf::BPF_SHMUL,
         );
-        entry("shmul32", AluBinary, ebpf::BPF_PQR | ebpf::BPF_SHMUL);
         entry(
             "udiv",
             AluBinary,
@@ -193,33 +209,19 @@ fn make_instruction_map() -> HashMap<String, (InstructionType, u8)> {
         );
         entry("srem32", AluBinary, ebpf::BPF_PQR | ebpf::BPF_SREM);
 
-        // LoadAbs, LoadInd, LoadReg, StoreImm, and StoreReg.
-        for &(suffix, size) in &mem_sizes {
-            entry(
-                &format!("ldabs{suffix}"),
-                LoadAbs,
-                ebpf::BPF_ABS | ebpf::BPF_LD | size,
-            );
-            entry(
-                &format!("ldind{suffix}"),
-                LoadInd,
-                ebpf::BPF_IND | ebpf::BPF_LD | size,
-            );
-            entry(
-                &format!("ldx{suffix}"),
-                LoadReg,
-                ebpf::BPF_MEM | ebpf::BPF_LDX | size,
-            );
-            entry(
-                &format!("st{suffix}"),
-                StoreImm,
-                ebpf::BPF_MEM | ebpf::BPF_ST | size,
-            );
-            entry(
-                &format!("stx{suffix}"),
-                StoreReg,
-                ebpf::BPF_MEM | ebpf::BPF_STX | size,
-            );
+        // Memory
+        if sbpf_version.move_memory_instruction_classes() {
+            for &(prefix, class, _, opcode) in &mem_classes {
+                for &(suffix, _, size) in &mem_sizes {
+                    entry(&format!("{prefix}{suffix}"), class, opcode | size);
+                }
+            }
+        } else {
+            for &(prefix, class, opcode, _) in &mem_classes {
+                for &(suffix, size, _) in &mem_sizes {
+                    entry(&format!("{prefix}{suffix}"), class, opcode | size);
+                }
+            }
         }
 
         // JumpConditional.
@@ -314,7 +316,7 @@ pub fn assemble<C: ContextObject>(
     let sbpf_version = loader.get_config().enabled_sbpf_versions.end().clone();
 
     let statements = parse(src)?;
-    let instruction_map = make_instruction_map();
+    let instruction_map = make_instruction_map(&sbpf_version);
     let mut insn_ptr = 0;
     let mut function_registry = FunctionRegistry::default();
     let mut labels = HashMap::new();
@@ -381,8 +383,6 @@ pub fn assemble<C: ContextObject>(
                                 insn(opc | ebpf::BPF_K, *dst, 0, 0, *imm)
                             }
                             (AluUnary, [Register(dst)]) => insn(opc, *dst, 0, 0, 0),
-                            (LoadAbs, [Integer(imm)]) => insn(opc, 0, 0, 0, *imm),
-                            (LoadInd, [Register(src), Integer(imm)]) => insn(opc, 0, *src, 0, *imm),
                             (LoadReg, [Register(dst), Memory(src, off)])
                             | (StoreReg, [Memory(dst, off), Register(src)]) => {
                                 insn(opc, *dst, *src, *off, 0)
