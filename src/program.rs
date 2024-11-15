@@ -15,8 +15,8 @@ pub enum SBPFVersion {
     V1,
     /// The current format
     V2,
-    /// The future format with BTF support
-    V3,
+    /// Used for future versions
+    Reserved,
 }
 
 impl SBPFVersion {
@@ -93,6 +93,11 @@ impl SBPFVersion {
 
     /// Move opcodes of memory instructions into ALU instruction classes
     pub fn move_memory_instruction_classes(self) -> bool {
+        self != SBPFVersion::V1
+    }
+
+    /// Constrain ELF format to ignore section headers and relocations
+    pub fn enable_stricter_elf_headers(self) -> bool {
         self != SBPFVersion::V1
     }
 }

@@ -370,27 +370,254 @@ impl<C: ContextObject> Executable<C> {
         })
     }
 
-    /// Fully loads an ELF, including validation and relocation
+    /// Fully loads an ELF
     pub fn load(bytes: &[u8], loader: Arc<BuiltinProgram<C>>) -> Result<Self, ElfError> {
-        // The new parser creates references from the input byte slice, so
-        // it must be properly aligned. We assume that HOST_ALIGN is a
-        // multiple of the ELF "natural" alignment. See test_load_unaligned.
-        let aligned;
-        let bytes = if is_memory_aligned(bytes.as_ptr() as usize, HOST_ALIGN) {
+        const E_FLAGS_OFFSET: usize = 48;
+        let e_flags = LittleEndian::read_u32(
             bytes
+                .get(E_FLAGS_OFFSET..E_FLAGS_OFFSET.saturating_add(std::mem::size_of::<u32>()))
+                .ok_or(ElfParserError::OutOfBounds)?,
+        );
+        let config = loader.get_config();
+        let sbpf_version = if config.enabled_sbpf_versions.end() == &SBPFVersion::V1 {
+            if e_flags == EF_SBPF_V2 {
+                SBPFVersion::V2
+            } else {
+                SBPFVersion::V1
+            }
         } else {
-            aligned = AlignedMemory::<{ HOST_ALIGN }>::from_slice(bytes);
-            aligned.as_slice()
+            match e_flags {
+                0 => SBPFVersion::V1,
+                EF_SBPF_V2 => SBPFVersion::V2,
+                _ => SBPFVersion::Reserved,
+            }
         };
-        Self::load_with_parser(&Elf64::parse(bytes)?, bytes, loader)
+        if !config.enabled_sbpf_versions.contains(&sbpf_version) {
+            return Err(ElfError::UnsupportedSBPFVersion);
+        }
+
+        let mut executable = if sbpf_version.enable_stricter_elf_headers() {
+            Self::load_with_strict_parser(bytes, loader)?
+        } else {
+            Self::load_with_lenient_parser(bytes, loader)?
+        };
+        executable.sbpf_version = sbpf_version;
+        Ok(executable)
     }
 
-    fn load_with_parser(
-        elf: &Elf64,
+    /// Loads an ELF without relocation
+    fn load_with_strict_parser(
+        bytes: &[u8],
+        loader: Arc<BuiltinProgram<C>>,
+    ) -> Result<Self, ElfParserError> {
+        use crate::elf_parser::{
+            consts::{
+                ELFMAG, EV_CURRENT, PF_R, PF_W, PF_X, PT_GNU_STACK, PT_LOAD, PT_NULL, SHN_UNDEF,
+                STT_FUNC,
+            },
+            types::{Elf64Ehdr, Elf64Shdr, Elf64Sym},
+        };
+
+        let aligned_memory = AlignedMemory::<{ HOST_ALIGN }>::from_slice(bytes);
+        let elf_bytes = aligned_memory.as_slice();
+
+        let (file_header_range, file_header) = Elf64::parse_file_header(elf_bytes)?;
+        let program_header_table_range = mem::size_of::<Elf64Ehdr>()
+            ..mem::size_of::<Elf64Phdr>()
+                .saturating_mul(file_header.e_phnum as usize)
+                .saturating_add(mem::size_of::<Elf64Ehdr>());
+        if file_header.e_ident.ei_mag != ELFMAG
+            || file_header.e_ident.ei_class != ELFCLASS64
+            || file_header.e_ident.ei_data != ELFDATA2LSB
+            || file_header.e_ident.ei_version != EV_CURRENT as u8
+            || file_header.e_ident.ei_osabi != ELFOSABI_NONE
+            || file_header.e_ident.ei_abiversion != 0x00
+            || file_header.e_ident.ei_pad != [0x00; 7]
+            || file_header.e_type != ET_DYN
+            || file_header.e_machine != EM_SBPF
+            || file_header.e_version != EV_CURRENT
+            // file_header.e_entry
+            || file_header.e_phoff != mem::size_of::<Elf64Ehdr>() as u64
+            // file_header.e_shoff
+            // file_header.e_flags
+            || file_header.e_ehsize != mem::size_of::<Elf64Ehdr>() as u16
+            || file_header.e_phentsize != mem::size_of::<Elf64Phdr>() as u16
+            || file_header.e_phnum < EXPECTED_PROGRAM_HEADERS.len() as u16
+            || program_header_table_range.end >= elf_bytes.len()
+            || file_header.e_shentsize != mem::size_of::<Elf64Shdr>() as u16
+            // file_header.e_shnum
+            || file_header.e_shstrndx >= file_header.e_shnum
+        {
+            return Err(ElfParserError::InvalidFileHeader);
+        }
+
+        const EXPECTED_PROGRAM_HEADERS: [(u32, u32, u64); 5] = [
+            (PT_LOAD, PF_X, ebpf::MM_BYTECODE_START), // byte code
+            (PT_LOAD, PF_R, ebpf::MM_RODATA_START),   // read only data
+            (PT_GNU_STACK, PF_R | PF_W, ebpf::MM_STACK_START), // stack
+            (PT_LOAD, PF_R | PF_W, ebpf::MM_HEAP_START), // heap
+            (PT_NULL, 0, 0xFFFFFFFF00000000),         // dynamic symbol table
+        ];
+        let program_header_table =
+            Elf64::slice_from_bytes::<Elf64Phdr>(elf_bytes, program_header_table_range.clone())?;
+        for (program_header, (p_type, p_flags, p_vaddr)) in program_header_table
+            .iter()
+            .zip(EXPECTED_PROGRAM_HEADERS.iter())
+        {
+            let p_filesz = if (*p_flags & PF_W) != 0 {
+                0
+            } else {
+                program_header.p_memsz
+            };
+            if program_header.p_type != *p_type
+                || program_header.p_flags != *p_flags
+                || program_header.p_offset < program_header_table_range.end as u64
+                || program_header.p_offset >= elf_bytes.len() as u64
+                || program_header.p_offset.checked_rem(ebpf::INSN_SIZE as u64) != Some(0)
+                || program_header.p_vaddr != *p_vaddr
+                || program_header.p_paddr != *p_vaddr
+                || program_header.p_filesz != p_filesz
+                || program_header.p_filesz
+                    > (elf_bytes.len() as u64).saturating_sub(program_header.p_offset)
+                || program_header.p_memsz >= ebpf::MM_REGION_SIZE
+            {
+                return Err(ElfParserError::InvalidProgramHeader);
+            }
+        }
+
+        let config = loader.get_config();
+        let symbol_names_section_header = if config.enable_symbol_and_section_labels {
+            let (_section_header_table_range, section_header_table) =
+                Elf64::parse_section_header_table(
+                    elf_bytes,
+                    file_header_range.clone(),
+                    file_header,
+                    program_header_table_range.clone(),
+                )?;
+            let section_names_section_header = (file_header.e_shstrndx != SHN_UNDEF)
+                .then(|| {
+                    section_header_table
+                        .get(file_header.e_shstrndx as usize)
+                        .ok_or(ElfParserError::OutOfBounds)
+                })
+                .transpose()?
+                .ok_or(ElfParserError::NoSectionNameStringTable)?;
+            let mut symbol_names_section_header = None;
+            for section_header in section_header_table.iter() {
+                let section_name = Elf64::get_string_in_section(
+                    elf_bytes,
+                    section_names_section_header,
+                    section_header.sh_name,
+                    64,
+                )?;
+                if section_name == b".dynstr" {
+                    symbol_names_section_header = Some(section_header);
+                }
+            }
+            symbol_names_section_header
+        } else {
+            None
+        };
+        let bytecode_header = &program_header_table[0];
+        let rodata_header = &program_header_table[1];
+        let dynamic_symbol_table: &[Elf64Sym] =
+            Elf64::slice_from_program_header(elf_bytes, &program_header_table[4])?;
+        let mut function_registry = FunctionRegistry::<usize>::default();
+        let mut expected_symbol_address = bytecode_header.p_vaddr;
+        for symbol in dynamic_symbol_table {
+            if symbol.st_info & STT_FUNC == 0 {
+                continue;
+            }
+            if symbol.st_value != expected_symbol_address {
+                return Err(ElfParserError::OutOfBounds);
+            }
+            if symbol.st_size == 0 || symbol.st_size.checked_rem(ebpf::INSN_SIZE as u64) != Some(0)
+            {
+                return Err(ElfParserError::InvalidSize);
+            }
+            if symbol.st_size
+                > bytecode_header
+                    .vm_range()
+                    .end
+                    .saturating_sub(symbol.st_value)
+            {
+                return Err(ElfParserError::OutOfBounds);
+            }
+            let target_pc = symbol
+                .st_value
+                .saturating_sub(bytecode_header.p_vaddr)
+                .checked_div(ebpf::INSN_SIZE as u64)
+                .unwrap_or_default() as usize;
+            let name = if config.enable_symbol_and_section_labels {
+                Elf64::get_string_in_section(
+                    elf_bytes,
+                    symbol_names_section_header
+                        .as_ref()
+                        .ok_or(ElfParserError::NoStringTable)?,
+                    symbol.st_name as Elf64Word,
+                    u8::MAX as usize,
+                )?
+            } else {
+                &[]
+            };
+            function_registry
+                .register_function(target_pc as u32, name, target_pc)
+                .unwrap();
+            expected_symbol_address = symbol.st_value.saturating_add(symbol.st_size);
+        }
+        if expected_symbol_address != bytecode_header.vm_range().end {
+            return Err(ElfParserError::OutOfBounds);
+        }
+        if !bytecode_header.vm_range().contains(&file_header.e_entry)
+            || file_header.e_entry.checked_rem(ebpf::INSN_SIZE as u64) != Some(0)
+        {
+            return Err(ElfParserError::InvalidFileHeader);
+        }
+        let entry_pc = file_header
+            .e_entry
+            .saturating_sub(bytecode_header.p_vaddr)
+            .checked_div(ebpf::INSN_SIZE as u64)
+            .unwrap_or_default() as usize;
+        if function_registry.lookup_by_key(entry_pc as u32).is_none() {
+            return Err(ElfParserError::InvalidFileHeader);
+        }
+
+        let text_section_vaddr = bytecode_header.p_vaddr;
+        let text_section_range = bytecode_header.file_range().unwrap_or_default();
+        let ro_section = Section::Borrowed(
+            rodata_header.p_vaddr as usize,
+            rodata_header.file_range().unwrap_or_default(),
+        );
+        Ok(Self {
+            elf_bytes: aligned_memory,
+            sbpf_version: SBPFVersion::Reserved, // Is set in Self::load()
+            ro_section,
+            text_section_vaddr,
+            text_section_range,
+            entry_pc,
+            function_registry,
+            loader,
+            #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+            compiled_program: None,
+        })
+    }
+
+    /// Loads an ELF with relocation
+    fn load_with_lenient_parser(
         bytes: &[u8],
         loader: Arc<BuiltinProgram<C>>,
     ) -> Result<Self, ElfError> {
-        let mut elf_bytes = AlignedMemory::from_slice(bytes);
+        // We always need one memory copy to take ownership and for relocations
+        let aligned_memory = AlignedMemory::<{ HOST_ALIGN }>::from_slice(bytes);
+        let (mut elf_bytes, unrelocated_elf_bytes) =
+            if is_memory_aligned(bytes.as_ptr() as usize, HOST_ALIGN) {
+                (aligned_memory, bytes)
+            } else {
+                // We might need another memory copy to ensure alignment
+                (aligned_memory.clone(), aligned_memory.as_slice())
+            };
+        let elf = Elf64::parse(unrelocated_elf_bytes)?;
+
         let config = loader.get_config();
         let header = elf.file_header();
         let sbpf_version = if header.e_flags == EF_SBPF_V2 {
@@ -399,10 +626,10 @@ impl<C: ContextObject> Executable<C> {
             SBPFVersion::V1
         };
 
-        Self::validate(config, elf, elf_bytes.as_slice())?;
+        Self::validate(config, &elf, elf_bytes.as_slice())?;
 
         // calculate the text section info
-        let text_section = get_section(elf, b".text")?;
+        let text_section = get_section(&elf, b".text")?;
         let text_section_vaddr =
             if sbpf_version.enable_elf_vaddr() && text_section.sh_addr >= ebpf::MM_RODATA_START {
                 text_section.sh_addr
@@ -427,7 +654,7 @@ impl<C: ContextObject> Executable<C> {
         Self::relocate(
             &mut function_registry,
             &loader,
-            elf,
+            &elf,
             elf_bytes.as_slice_mut(),
         )?;
 
@@ -1154,7 +1381,7 @@ mod test {
         elf_parser::{
             // FIXME consts::{ELFCLASS32, ELFDATA2MSB, ET_REL},
             consts::{ELFCLASS32, ELFDATA2MSB, ET_REL},
-            types::{Elf64Ehdr, Elf64Shdr},
+            types::{Elf64Ehdr, Elf64Shdr, Elf64Sym},
             SECTION_NAME_LENGTH_MAXIMUM,
         },
         error::ProgramResult,
@@ -1181,6 +1408,137 @@ mod test {
             Config::default(),
             function_registry,
         ))
+    }
+
+    #[test]
+    fn test_strict_header() {
+        let elf_bytes =
+            std::fs::read("tests/elfs/strict_header.so").expect("failed to read elf file");
+        let loader = loader();
+
+        // Check that the unmodified file can be parsed
+        {
+            let loader = Arc::new(BuiltinProgram::new_loader(
+                Config {
+                    enable_symbol_and_section_labels: true,
+                    ..Config::default()
+                },
+                FunctionRegistry::<BuiltinFunction<TestContextObject>>::default(),
+            ));
+            let executable = ElfExecutable::load(&elf_bytes, loader.clone()).unwrap();
+            let (name, _pc) = executable.get_function_registry().lookup_by_key(4).unwrap();
+            assert_eq!(name, b"entrypoint");
+        }
+
+        // Check that using a reserved SBPF version fails
+        {
+            let mut elf_bytes = elf_bytes.clone();
+            elf_bytes[0x0030] = 0xFF;
+            let err = ElfExecutable::load(&elf_bytes, loader.clone()).unwrap_err();
+            assert_eq!(err, ElfError::UnsupportedSBPFVersion);
+        }
+
+        // Check that an empty file fails
+        let err = ElfExecutable::load_with_strict_parser(&[], loader.clone()).unwrap_err();
+        assert_eq!(err, ElfParserError::OutOfBounds);
+
+        // Break the file header one byte at a time
+        let expected_results = std::iter::repeat(&Err(ElfParserError::InvalidFileHeader))
+            .take(40)
+            .chain(std::iter::repeat(&Ok(())).take(12))
+            .chain(std::iter::repeat(&Err(ElfParserError::InvalidFileHeader)).take(4))
+            .chain(std::iter::repeat(&Err(ElfParserError::InvalidProgramHeader)).take(1))
+            .chain(std::iter::repeat(&Err(ElfParserError::InvalidFileHeader)).take(3))
+            .chain(std::iter::repeat(&Ok(())).take(2))
+            .chain(std::iter::repeat(&Err(ElfParserError::InvalidFileHeader)).take(2));
+        for (offset, expected) in (0..std::mem::size_of::<Elf64Ehdr>()).zip(expected_results) {
+            let mut elf_bytes = elf_bytes.clone();
+            elf_bytes[offset] = 0xAF;
+            let result =
+                ElfExecutable::load_with_strict_parser(&elf_bytes, loader.clone()).map(|_| ());
+            assert_eq!(&result, expected);
+        }
+
+        // Break the program header table one byte at a time
+        let expected_results_readonly =
+            std::iter::repeat(&Err(ElfParserError::InvalidProgramHeader))
+                .take(48)
+                .chain(std::iter::repeat(&Ok(())).take(8))
+                .collect::<Vec<_>>();
+        let expected_results_writable =
+            std::iter::repeat(&Err(ElfParserError::InvalidProgramHeader))
+                .take(40)
+                .chain(std::iter::repeat(&Ok(())).take(4))
+                .chain(std::iter::repeat(&Err(ElfParserError::InvalidProgramHeader)).take(4))
+                .chain(std::iter::repeat(&Ok(())).take(8))
+                .collect::<Vec<_>>();
+        let expected_results = vec![
+            expected_results_readonly.iter(),
+            expected_results_readonly.iter(),
+            expected_results_writable.iter(),
+            expected_results_writable.iter(),
+            expected_results_readonly.iter(),
+        ];
+        for (header_index, expected_results) in expected_results.into_iter().enumerate() {
+            for (offset, expected) in (std::mem::size_of::<Elf64Ehdr>()
+                + std::mem::size_of::<Elf64Phdr>() * header_index
+                ..std::mem::size_of::<Elf64Ehdr>()
+                    + std::mem::size_of::<Elf64Phdr>() * (header_index + 1))
+                .zip(expected_results)
+            {
+                let mut elf_bytes = elf_bytes.clone();
+                elf_bytes[offset] = 0xAF;
+                let result =
+                    ElfExecutable::load_with_strict_parser(&elf_bytes, loader.clone()).map(|_| ());
+                assert_eq!(&&result, expected);
+            }
+        }
+
+        // Break the dynamic symbol table one byte at a time
+        for index in 1..3 {
+            let expected_results = std::iter::repeat(&Ok(()))
+                .take(8)
+                .chain(std::iter::repeat(&Err(ElfParserError::OutOfBounds)).take(8))
+                .chain(std::iter::repeat(&Err(ElfParserError::InvalidSize)).take(1))
+                .chain(std::iter::repeat(&Err(ElfParserError::OutOfBounds)).take(7));
+            for (offset, expected) in (0x3000 + std::mem::size_of::<Elf64Sym>() * index
+                ..0x3000 + std::mem::size_of::<Elf64Sym>() * (index + 1))
+                .zip(expected_results)
+            {
+                let mut elf_bytes = elf_bytes.clone();
+                elf_bytes[offset] = 0xAF;
+                let result =
+                    ElfExecutable::load_with_strict_parser(&elf_bytes, loader.clone()).map(|_| ());
+                assert_eq!(&result, expected);
+            }
+        }
+
+        // Check that an empty function symbol fails
+        {
+            let mut elf_bytes = elf_bytes.clone();
+            elf_bytes[0x3040] = 0x00;
+            let err =
+                ElfExecutable::load_with_strict_parser(&elf_bytes, loader.clone()).unwrap_err();
+            assert_eq!(err, ElfParserError::InvalidSize);
+        }
+
+        // Check that bytecode not covered by function symbols fails
+        {
+            let mut elf_bytes = elf_bytes.clone();
+            elf_bytes[0x3040] = 0x08;
+            let err =
+                ElfExecutable::load_with_strict_parser(&elf_bytes, loader.clone()).unwrap_err();
+            assert_eq!(err, ElfParserError::OutOfBounds);
+        }
+
+        // Check that an entrypoint not covered by function symbols fails
+        {
+            let mut elf_bytes = elf_bytes.clone();
+            elf_bytes[0x0018] = 0x10;
+            let err =
+                ElfExecutable::load_with_strict_parser(&elf_bytes, loader.clone()).unwrap_err();
+            assert_eq!(err, ElfParserError::InvalidFileHeader);
+        }
     }
 
     #[test]
