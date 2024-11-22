@@ -41,14 +41,31 @@ macro_rules! test_interpreter_and_jit {
             .unwrap();
     };
     ($executable:expr, $mem:tt, $context_object:expr, $expected_result:expr $(,)?) => {
-        test_interpreter_and_jit!(true, $executable, $mem, $context_object, $expected_result)
+        test_interpreter_and_jit!(
+            false,
+            true,
+            $executable,
+            $mem,
+            $context_object,
+            $expected_result
+        )
     };
     ($verify:literal, $executable:expr, $mem:tt, $context_object:expr, $expected_result:expr $(,)?) => {
+        test_interpreter_and_jit!(
+            false,
+            $verify,
+            $executable,
+            $mem,
+            $context_object,
+            $expected_result
+        )
+    };
+    ($override_budget:literal, $verify:literal, $executable:expr, $mem:tt, $context_object:expr, $expected_result:expr $(,)?) => {
         let expected_instruction_count = $context_object.get_remaining();
         #[allow(unused_mut)]
         let mut context_object = $context_object;
         let expected_result = format!("{:?}", $expected_result);
-        if !expected_result.contains("ExceededMaxInstructions") {
+        if !$override_budget && !expected_result.contains("ExceededMaxInstructions") {
             context_object.remaining = INSTRUCTION_METER_BUDGET;
         }
         if $verify {
@@ -2347,18 +2364,74 @@ fn test_callx() {
 
 #[test]
 fn test_err_callx_unregistered() {
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V1..=SBPFVersion::V1,
+        ..Config::default()
+    };
+
+    // Callx jumps to `mov64 r0, 0x2A`
     test_interpreter_and_jit_asm!(
         "
         mov64 r0, 0x0
-        or64 r8, 0x20
+        lddw r8, 0x100000028
         callx r8
         exit
         mov64 r0, 0x2A
         exit",
+        config,
         [],
-        TestContextObject::new(4),
+        TestContextObject::new(6),
+        ProgramResult::Ok(42),
+    );
+
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V2..=SBPFVersion::V2,
+        ..Config::default()
+    };
+
+    // Callx jumps to `mov64 r0, 0x2A`
+    test_interpreter_and_jit_asm!(
+        "
+        mov64 r0, 0x0
+        or64 r8, 0x28
+        callx r8
+        exit
+        mov64 r0, 0x2A
+        exit",
+        config,
+        [],
+        TestContextObject::new(3),
         ProgramResult::Err(EbpfError::UnsupportedInstruction),
     );
+
+    let versions = [SBPFVersion::V1, SBPFVersion::V2];
+    let expected_errors = [
+        EbpfError::CallOutsideTextSegment,
+        EbpfError::UnsupportedInstruction,
+    ];
+
+    // We execute three instructions when callx errors out.
+    for (version, error) in versions.iter().zip(expected_errors) {
+        let config = Config {
+            enabled_sbpf_versions: *version..=*version,
+            ..Config::default()
+        };
+
+        // Callx jumps to a location outside text segment
+        test_interpreter_and_jit_asm!(
+            "
+            mov64 r0, 0x0
+            or64 r8, 0x20
+            callx r8
+            exit
+            mov64 r0, 0x2A
+            exit",
+            config,
+            [],
+            TestContextObject::new(3),
+            ProgramResult::Err(error),
+        );
+    }
 }
 
 #[test]
@@ -3444,6 +3517,56 @@ fn test_invalid_exit_or_return() {
             ProgramResult::Err(EbpfError::UnsupportedInstruction),
         );
     }
+}
+
+#[test]
+fn callx_unsupported_instruction_and_exceeded_max_instructions() {
+    let program = "
+        sub32 r7, r1
+        sub64 r5, 8
+        sub64 r7, 0
+        callx r5
+        callx r5
+        return
+        ";
+    test_interpreter_and_jit_asm!(
+        program,
+        [],
+        TestContextObject::new(4),
+        ProgramResult::Err(EbpfError::UnsupportedInstruction),
+    );
+
+    let loader = Arc::new(BuiltinProgram::new_loader(
+        Config::default(),
+        FunctionRegistry::default(),
+    ));
+
+    let mut executable = assemble(program, loader).unwrap();
+    test_interpreter_and_jit!(
+        true,
+        false,
+        executable,
+        [],
+        TestContextObject::new(4),
+        ProgramResult::Err(EbpfError::UnsupportedInstruction)
+    );
+}
+
+#[test]
+fn test_capped_after_callx() {
+    test_interpreter_and_jit_asm!(
+        "
+        mov64 r0, 0x0
+        or64 r8, 0x20
+        callx r8
+        exit
+        function_foo:
+        mov64 r0, 0x2A
+        exit",
+        [],
+        TestContextObject::new(3),
+        ProgramResult::Err(EbpfError::ExceededMaxInstructions),
+    );
 }
 
 // SBPFv1 only [DEPRECATED]
