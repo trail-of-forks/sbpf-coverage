@@ -13,7 +13,7 @@
 //! Interpreter for eBPF programs.
 
 use crate::{
-    ebpf::{self, STACK_PTR_REG},
+    ebpf,
     elf::Executable,
     error::{EbpfError, ProgramResult},
     program::BuiltinFunction,
@@ -146,9 +146,8 @@ impl<'a, 'b, C: ContextObject> Interpreter<'a, 'b, C> {
             // With fixed frames we start the new frame at the next fixed offset
             let stack_frame_size =
                 config.stack_frame_size * if config.enable_stack_frame_gaps { 2 } else { 1 };
-            self.vm.stack_pointer += stack_frame_size as u64;
+            self.reg[ebpf::FRAME_PTR_REG] += stack_frame_size as u64;
         }
-        self.reg[ebpf::FRAME_PTR_REG] = self.vm.stack_pointer;
 
         true
     }
@@ -189,16 +188,6 @@ impl<'a, 'b, C: ContextObject> Interpreter<'a, 'b, C> {
         }
 
         match insn.opc {
-            ebpf::ADD64_IMM if dst == STACK_PTR_REG && self.executable.get_sbpf_version().dynamic_stack_frames() => {
-                // Let the stack overflow. For legitimate programs, this is a nearly
-                // impossible condition to hit since programs are metered and we already
-                // enforce a maximum call depth. For programs that intentionally mess
-                // around with the stack pointer, MemoryRegion::map will return
-                // InvalidVirtualAddress(stack_ptr) once an invalid stack address is
-                // accessed.
-                self.vm.stack_pointer = self.vm.stack_pointer.overflowing_add(insn.imm as u64).0;
-            }
-
             ebpf::LD_DW_IMM if !self.executable.get_sbpf_version().disable_lddw() => {
                 ebpf::augment_lddw_unchecked(self.program, &mut insn);
                 self.reg[dst] = insn.imm as u64;
@@ -584,11 +573,6 @@ impl<'a, 'b, C: ContextObject> Interpreter<'a, 'b, C> {
                 self.reg[ebpf::FIRST_SCRATCH_REG
                     ..ebpf::FIRST_SCRATCH_REG + ebpf::SCRATCH_REGS]
                     .copy_from_slice(&frame.caller_saved_registers);
-                if !self.executable.get_sbpf_version().dynamic_stack_frames() {
-                    let stack_frame_size =
-                        config.stack_frame_size * if config.enable_stack_frame_gaps { 2 } else { 1 };
-                    self.vm.stack_pointer -= stack_frame_size as u64;
-                }
                 check_pc!(self, next_pc, frame.target_pc);
             }
             _ => throw_error!(self, EbpfError::UnsupportedInstruction),

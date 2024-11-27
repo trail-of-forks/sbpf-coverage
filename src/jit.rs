@@ -24,7 +24,7 @@ use rand::{
 use std::{fmt::Debug, mem, ptr};
 
 use crate::{
-    ebpf::{self, FIRST_SCRATCH_REG, FRAME_PTR_REG, INSN_SIZE, SCRATCH_REGS, STACK_PTR_REG},
+    ebpf::{self, FIRST_SCRATCH_REG, FRAME_PTR_REG, INSN_SIZE, SCRATCH_REGS},
     elf::Executable,
     error::{EbpfError, ProgramResult},
     memory_management::{
@@ -255,15 +255,14 @@ struct Jump {
 enum RuntimeEnvironmentSlot {
     HostStackPointer = 0,
     CallDepth = 1,
-    StackPointer = 2,
-    ContextObjectPointer = 3,
-    PreviousInstructionMeter = 4,
-    DueInsnCount = 5,
-    StopwatchNumerator = 6,
-    StopwatchDenominator = 7,
-    Registers = 8,
-    ProgramResult = 20,
-    MemoryMapping = 28,
+    ContextObjectPointer = 2,
+    PreviousInstructionMeter = 3,
+    DueInsnCount = 4,
+    StopwatchNumerator = 5,
+    StopwatchDenominator = 6,
+    Registers = 7,
+    ProgramResult = 19,
+    MemoryMapping = 27,
 }
 
 /* Explanation of the Instruction Meter
@@ -418,16 +417,11 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 self.emit_ins(X86Instruction::load_immediate(OperandSize::S64, REGISTER_SCRATCH, 0));
             }
 
-            let dst = if insn.dst == STACK_PTR_REG as u8 { u8::MAX } else { REGISTER_MAP[insn.dst as usize] };
+            let dst = if insn.dst == FRAME_PTR_REG as u8 { u8::MAX } else { REGISTER_MAP[insn.dst as usize] };
             let src = REGISTER_MAP[insn.src as usize];
             let target_pc = (self.pc as isize + insn.off as isize + 1) as usize;
 
             match insn.opc {
-                ebpf::ADD64_IMM if insn.dst == STACK_PTR_REG as u8 && self.executable.get_sbpf_version().dynamic_stack_frames() => {
-                    let stack_ptr_access = X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::StackPointer));
-                    self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 0, REGISTER_PTR_TO_VM, insn.imm, Some(stack_ptr_access)));
-                }
-
                 ebpf::LD_DW_IMM if !self.executable.get_sbpf_version().disable_lddw() => {
                     self.emit_validate_and_profile_instruction_count(false, Some(self.pc + 2));
                     self.pc += 1;
@@ -754,25 +748,16 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     self.emit_validate_instruction_count(Some(self.pc));
 
                     let call_depth_access = X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::CallDepth));
-                    self.emit_ins(X86Instruction::load(OperandSize::S64, REGISTER_PTR_TO_VM, REGISTER_MAP[FRAME_PTR_REG], call_depth_access));
-
-                    // If CallDepth == 0, we've reached the exit instruction of the entry point
-                    self.emit_ins(X86Instruction::cmp_immediate(OperandSize::S32, REGISTER_MAP[FRAME_PTR_REG], 0, None));
+                    // If env.call_depth == 0, we've reached the exit instruction of the entry point
+                    self.emit_ins(X86Instruction::cmp_immediate(OperandSize::S32, REGISTER_PTR_TO_VM, 0, Some(call_depth_access)));
                     if self.config.enable_instruction_meter {
                         self.emit_ins(X86Instruction::load_immediate(OperandSize::S64, REGISTER_SCRATCH, self.pc as i64));
                     }
                     // we're done
                     self.emit_ins(X86Instruction::conditional_jump_immediate(0x84, self.relative_to_anchor(ANCHOR_EXIT, 6)));
 
-                    // else decrement and update CallDepth
-                    self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 5, REGISTER_MAP[FRAME_PTR_REG], 1, None));
-                    self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_MAP[FRAME_PTR_REG], REGISTER_PTR_TO_VM, call_depth_access));
-
-                    if !self.executable.get_sbpf_version().dynamic_stack_frames() {
-                        let stack_pointer_access = X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::StackPointer));
-                        let stack_frame_size = self.config.stack_frame_size as i64 * if self.config.enable_stack_frame_gaps { 2 } else { 1 };
-                        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 5, REGISTER_PTR_TO_VM, stack_frame_size, Some(stack_pointer_access))); // env.stack_pointer -= stack_frame_size;
-                    }
+                    // else decrement and update env.call_depth
+                    self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 5, REGISTER_PTR_TO_VM, 1, Some(call_depth_access))); // env.call_depth -= 1;
 
                     // and return
                     self.emit_profile_instruction_count(false, Some(0));
@@ -1540,23 +1525,18 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         // Push the caller's frame pointer. The code to restore it is emitted at the end of emit_internal_call().
         self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_MAP[FRAME_PTR_REG], RSP, X86IndirectAccess::OffsetIndexShift(8, RSP, 0)));
         self.emit_ins(X86Instruction::xchg(OperandSize::S64, REGISTER_SCRATCH, RSP, Some(X86IndirectAccess::OffsetIndexShift(0, RSP, 0)))); // Push return address and restore original REGISTER_SCRATCH
-
-        // Increase CallDepth
+        // Increase env.call_depth
         let call_depth_access = X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::CallDepth));
-        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 0, REGISTER_PTR_TO_VM, 1, Some(call_depth_access)));
-        self.emit_ins(X86Instruction::load(OperandSize::S64, REGISTER_PTR_TO_VM, REGISTER_MAP[FRAME_PTR_REG], call_depth_access));
-        // If CallDepth == self.config.max_call_depth, stop and return CallDepthExceeded
-        self.emit_ins(X86Instruction::cmp_immediate(OperandSize::S32, REGISTER_MAP[FRAME_PTR_REG], self.config.max_call_depth as i64, None));
+        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 0, REGISTER_PTR_TO_VM, 1, Some(call_depth_access))); // env.call_depth += 1;
+        // If env.call_depth == self.config.max_call_depth, throw CallDepthExceeded
+        self.emit_ins(X86Instruction::cmp_immediate(OperandSize::S32, REGISTER_PTR_TO_VM, self.config.max_call_depth as i64, Some(call_depth_access)));
         self.emit_ins(X86Instruction::conditional_jump_immediate(0x83, self.relative_to_anchor(ANCHOR_CALL_DEPTH_EXCEEDED, 6)));
-
         // Setup the frame pointer for the new frame. What we do depends on whether we're using dynamic or fixed frames.
-        let stack_pointer_access = X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::StackPointer));
         if !self.executable.get_sbpf_version().dynamic_stack_frames() {
             // With fixed frames we start the new frame at the next fixed offset
             let stack_frame_size = self.config.stack_frame_size as i64 * if self.config.enable_stack_frame_gaps { 2 } else { 1 };
-            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 0, REGISTER_PTR_TO_VM, stack_frame_size, Some(stack_pointer_access))); // env.stack_pointer += stack_frame_size;
+            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 0, REGISTER_MAP[FRAME_PTR_REG], stack_frame_size, None)); // REGISTER_MAP[FRAME_PTR_REG] += stack_frame_size;
         }
-        self.emit_ins(X86Instruction::load(OperandSize::S64, REGISTER_PTR_TO_VM, REGISTER_MAP[FRAME_PTR_REG], stack_pointer_access)); // reg[ebpf::FRAME_PTR_REG] = env.stack_pointer;
         self.emit_ins(X86Instruction::return_near());
 
         // Routine for emit_internal_call(Value::Register())
@@ -1757,7 +1737,6 @@ mod tests {
 
         check_slot!(env, host_stack_pointer, HostStackPointer);
         check_slot!(env, call_depth, CallDepth);
-        check_slot!(env, stack_pointer, StackPointer);
         check_slot!(env, context_object_pointer, ContextObjectPointer);
         check_slot!(env, previous_instruction_meter, PreviousInstructionMeter);
         check_slot!(env, due_insn_count, DueInsnCount);

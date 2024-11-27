@@ -2087,14 +2087,13 @@ fn test_err_dynamic_stack_ptr_overflow() {
     // See the comment in CallFrames::resize_stack() for the reason why it's
     // safe to let the stack pointer overflow
 
-    // stack_ptr -= stack_ptr + 1
     test_interpreter_and_jit_asm!(
         "
-        add r11, -0x7FFFFFFF
-        add r11, -0x7FFFFFFF
-        add r11, -0x7FFFFFFF
-        add r11, -0x7FFFFFFF
-        add r11, -0x40005
+        add r10, -0x7FFFFF00
+        add r10, -0x7FFFFF00
+        add r10, -0x7FFFFF00
+        add r10, -0x7FFFFF00
+        add r10, -0x40440
         call function_foo
         exit
         function_foo:
@@ -2104,7 +2103,7 @@ fn test_err_dynamic_stack_ptr_overflow() {
         TestContextObject::new(7),
         ProgramResult::Err(EbpfError::AccessViolation(
             AccessType::Store,
-            u64::MAX,
+            u64::MAX - 63,
             1,
             "unknown"
         )),
@@ -2134,11 +2133,26 @@ fn test_dynamic_stack_frames_empty() {
 fn test_dynamic_frame_ptr() {
     let config = Config::default();
 
-    // Check that upon entering a function (foo) the frame pointer is advanced
-    // to the top of the stack
+    // Check that changes to r10 are immediately visible
     test_interpreter_and_jit_asm!(
         "
-        add r11, -8
+        add r10, -64
+        stxdw [r10+8], r10
+        call function_foo
+        ldxdw r0, [r10+8]
+        exit
+        function_foo:
+        exit",
+        config.clone(),
+        [],
+        TestContextObject::new(6),
+        ProgramResult::Ok(ebpf::MM_STACK_START + config.stack_size() as u64 - 64),
+    );
+
+    // Check that changes to r10 continue to be visible in a callee
+    test_interpreter_and_jit_asm!(
+        "
+        add r10, -64
         call function_foo
         exit
         function_foo:
@@ -2147,18 +2161,17 @@ fn test_dynamic_frame_ptr() {
         config.clone(),
         [],
         TestContextObject::new(5),
-        ProgramResult::Ok(ebpf::MM_STACK_START + config.stack_size() as u64 - 8),
+        ProgramResult::Ok(ebpf::MM_STACK_START + config.stack_size() as u64 - 64),
     );
 
-    // And check that when exiting a function (foo) the caller's frame pointer
-    // is restored
+    // And check that changes to r10 are undone after returning
     test_interpreter_and_jit_asm!(
         "
-        add r11, -8
         call function_foo
         mov r0, r10
         exit
         function_foo:
+        add r10, -64
         exit
         ",
         config.clone(),
