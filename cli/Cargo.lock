@@ -301,11 +301,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "rbpf_cli"
-version = "0.8.2"
+name = "sbpf_cli"
+version = "0.9.0"
 dependencies = [
  "clap",
- "solana_rbpf",
+ "solana-sbpf",
  "test_utils",
 ]
 
@@ -322,8 +322,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04c565b551bafbef4157586fa379538366e4385d42082f255bfd96e4fe8519da"
 
 [[package]]
-name = "solana_rbpf"
-version = "0.8.2"
+name = "solana-sbpf"
+version = "0.9.0"
 dependencies = [
  "byteorder",
  "combine",
@@ -366,10 +366,10 @@ dependencies = [
 
 [[package]]
 name = "test_utils"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "libc",
- "solana_rbpf",
+ "solana-sbpf",
 ]
 
 [[package]]
