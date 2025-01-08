@@ -1,11 +1,12 @@
+#![allow(clippy::literal_string_with_formatting_args)]
+
 use solana_sbpf::{
     elf::Executable,
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry},
-    syscalls,
-    vm::{Config, RuntimeEnvironmentSlot, TestContextObject},
+    vm::{Config, RuntimeEnvironmentSlot},
 };
 use std::{fs::File, io::Read, sync::Arc};
-use test_utils::create_vm;
+use test_utils::{create_vm, syscalls, TestContextObject};
 
 #[test]
 fn test_runtime_environment_slots() {

@@ -1,5 +1,7 @@
+#![allow(clippy::literal_string_with_formatting_args)]
 #![allow(clippy::arithmetic_side_effects)]
 #![cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+
 // Copyright 2020 Solana Maintainers <maintainers@solana.com>
 //
 // Licensed under the Apache License, Version 2.0 <http://www.apache.org/licenses/LICENSE-2.0> or
@@ -20,10 +22,10 @@ use solana_sbpf::{
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
     static_analysis::Analysis,
     verifier::RequisiteVerifier,
-    vm::{Config, ContextObject, TestContextObject},
+    vm::{Config, ContextObject},
 };
 use std::sync::Arc;
-use test_utils::{create_vm, test_interpreter_and_jit};
+use test_utils::{create_vm, test_interpreter_and_jit, TestContextObject};
 
 // BPF_ALU32_LOAD : Arithmetic and Logic
 #[test]

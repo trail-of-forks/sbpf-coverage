@@ -1,5 +1,6 @@
+#![allow(clippy::literal_string_with_formatting_args)]
+
 use byteorder::{ByteOrder, LittleEndian};
-use rand::{distributions::Uniform, Rng};
 use solana_sbpf::{
     ebpf,
     elf::{get_ro_region, ElfError, Executable, Section},
@@ -9,13 +10,11 @@ use solana_sbpf::{
         Elf64, ElfParserError, SECTION_NAME_LENGTH_MAXIMUM,
     },
     error::ProgramResult,
-    fuzz::fuzz,
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
-    syscalls,
-    vm::{Config, TestContextObject},
+    vm::Config,
 };
 use std::{fs::File, io::Read, sync::Arc};
-use test_utils::assert_error;
+use test_utils::{assert_error, syscalls, TestContextObject};
 
 type ElfExecutable = Executable<TestContextObject>;
 
@@ -293,68 +292,6 @@ fn test_entrypoint() {
     let elf = ElfExecutable::load(&elf_bytes, loader).expect("validation failed");
     let executable: &Executable<TestContextObject> = &elf;
     assert_eq!(4, executable.get_entrypoint_instruction_offset());
-}
-
-#[test]
-#[ignore]
-fn test_fuzz_load() {
-    let loader = loader();
-
-    // Random bytes, will mostly fail due to lack of ELF header so just do a few
-    let mut rng = rand::thread_rng();
-    let range = Uniform::new(0, 255);
-    println!("random bytes");
-    for _ in 0..1_000 {
-        let elf_bytes: Vec<u8> = (0..100).map(|_| rng.sample(range)).collect();
-        let _ = ElfExecutable::load(&elf_bytes, loader.clone());
-    }
-
-    // Take a real elf and mangle it
-
-    let mut file = File::open("tests/elfs/noop.so").expect("file open failed");
-    let mut elf_bytes = Vec::new();
-    file.read_to_end(&mut elf_bytes)
-        .expect("failed to read elf file");
-    let parsed_elf = Elf64::parse(&elf_bytes).unwrap();
-
-    // focus on elf header, small typically 64 bytes
-    println!("mangle elf header");
-    fuzz(
-        &elf_bytes,
-        1_000_000,
-        100,
-        0..parsed_elf.file_header().e_ehsize as usize,
-        0..255,
-        |bytes: &mut [u8]| {
-            let _ = ElfExecutable::load(bytes, loader.clone());
-        },
-    );
-
-    // focus on section headers
-    println!("mangle section headers");
-    fuzz(
-        &elf_bytes,
-        1_000_000,
-        100,
-        parsed_elf.file_header().e_shoff as usize..elf_bytes.len(),
-        0..255,
-        |bytes: &mut [u8]| {
-            let _ = ElfExecutable::load(bytes, loader.clone());
-        },
-    );
-
-    // mangle whole elf randomly
-    println!("mangle whole elf");
-    fuzz(
-        &elf_bytes,
-        1_000_000,
-        100,
-        0..elf_bytes.len(),
-        0..255,
-        |bytes: &mut [u8]| {
-            let _ = ElfExecutable::load(bytes, loader.clone());
-        },
-    );
 }
 
 fn new_section(sh_addr: u64, sh_size: u64) -> Elf64Shdr {

@@ -1,5 +1,7 @@
+#![allow(clippy::literal_string_with_formatting_args)]
 #![allow(clippy::arithmetic_side_effects)]
 #![cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+
 // Copyright 2020 Solana Maintainers <maintainers@solana.com>
 //
 // Licensed under the Apache License, Version 2.0 <http://www.apache.org/licenses/LICENSE-2.0> or
@@ -23,15 +25,14 @@ use solana_sbpf::{
     memory_region::{AccessType, MemoryMapping, MemoryRegion},
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
     static_analysis::Analysis,
-    syscalls,
     verifier::RequisiteVerifier,
-    vm::{Config, ContextObject, TestContextObject},
+    vm::{Config, ContextObject},
 };
 use std::{fs::File, io::Read, sync::Arc};
 use test_utils::{
-    assert_error, create_vm, test_interpreter_and_jit, test_interpreter_and_jit_asm,
-    test_interpreter_and_jit_elf, test_syscall_asm, PROG_TCP_PORT_80, TCP_SACK_ASM, TCP_SACK_MATCH,
-    TCP_SACK_NOMATCH,
+    assert_error, create_vm, syscalls, test_interpreter_and_jit, test_interpreter_and_jit_asm,
+    test_interpreter_and_jit_elf, test_syscall_asm, TestContextObject, PROG_TCP_PORT_80,
+    TCP_SACK_ASM, TCP_SACK_MATCH, TCP_SACK_NOMATCH,
 };
 
 // BPF_ALU32_LOAD : Arithmetic and Logic

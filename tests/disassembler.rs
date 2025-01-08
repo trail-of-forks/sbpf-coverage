@@ -1,3 +1,5 @@
+#![allow(clippy::literal_string_with_formatting_args)]
+
 // Copyright 2017 Jan-Erik Rediger <badboy@archlinux.us>
 //
 // Adopted from tests in `tests/assembler.rs`
@@ -12,9 +14,10 @@ use solana_sbpf::{
     assembler::assemble,
     program::{BuiltinProgram, FunctionRegistry},
     static_analysis::Analysis,
-    vm::{Config, TestContextObject},
+    vm::Config,
 };
 use std::sync::Arc;
+use test_utils::TestContextObject;
 
 // Using a macro to keep actual line numbers in failure output
 macro_rules! disasm {

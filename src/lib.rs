@@ -11,6 +11,7 @@
 
 //! Virtual machine for SBPF programs.
 #![warn(missing_docs)]
+#![allow(clippy::literal_string_with_formatting_args)]
 #![deny(clippy::arithmetic_side_effects)]
 #![deny(clippy::ptr_as_ptr)]
 
@@ -31,7 +32,6 @@ pub mod ebpf;
 pub mod elf;
 pub mod elf_parser;
 pub mod error;
-pub mod fuzz;
 pub mod insn_builder;
 pub mod interpreter;
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
@@ -41,7 +41,6 @@ mod memory_management;
 pub mod memory_region;
 pub mod program;
 pub mod static_analysis;
-pub mod syscalls;
 pub mod verifier;
 pub mod vm;
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
