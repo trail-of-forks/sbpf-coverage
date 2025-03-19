@@ -15,8 +15,9 @@ use solana_sbpf::{
     error::EbpfError,
     memory_region::{MemoryCowCallback, MemoryMapping, MemoryRegion},
     static_analysis::TraceLogEntry,
-    vm::ContextObject,
+    vm::{self, ContextObject},
 };
+use std::path::Path;
 
 pub mod syscalls;
 
@@ -32,6 +33,10 @@ pub struct TestContextObject {
 impl ContextObject for TestContextObject {
     fn trace(&mut self, state: [u64; 12]) {
         self.trace_log.push(state);
+    }
+
+    fn write_trace(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
+        vm::write_trace(&self.trace_log, path)
     }
 
     fn consume(&mut self, amount: u64) {
@@ -401,7 +406,7 @@ macro_rules! test_interpreter_and_jit_asm {
         #[allow(unused_mut)]
         {
             let mut config = $config;
-            config.enable_instruction_tracing = true;
+            config.enable_instruction_tracing_write_only = true;
             let loader = Arc::new(BuiltinProgram::new_loader(config));
             let mut executable = assemble($source, loader).unwrap();
             test_interpreter_and_jit!(executable, $mem, $context_object, $expected_result);
@@ -428,7 +433,7 @@ macro_rules! test_syscall_asm {
     };
     ($source:expr, $mem:expr, ($($syscall_name:expr => $syscall_function:expr),*$(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
         let mut config = Config {
-            enable_instruction_tracing: true,
+            enable_instruction_tracing_write_only: true,
             ..Config::default()
         };
         for sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
@@ -460,7 +465,7 @@ macro_rules! test_interpreter_and_jit_elf {
     };
     ($source:expr, $mem:expr, ($($syscall_name:expr => $syscall_function:expr),* $(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
         let config = Config {
-            enable_instruction_tracing: true,
+            enable_instruction_tracing_write_only: true,
             ..Config::default()
         };
         test_interpreter_and_jit_elf!($source, config, $mem, ($($syscall_name => $syscall_function),*), $context_object, $expected_result);

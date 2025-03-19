@@ -3284,7 +3284,7 @@ fn execute_generated_program(prog: &[u8]) -> bool {
     let executable = Executable::<TestContextObject>::from_text_bytes(
         prog,
         Arc::new(BuiltinProgram::new_loader(Config {
-            enable_instruction_tracing: true,
+            enable_instruction_tracing_write_only: true,
             ..Config::default()
         })),
         SBPFVersion::V3,

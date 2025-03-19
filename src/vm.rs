@@ -19,9 +19,15 @@ use crate::{
     interpreter::Interpreter,
     memory_region::MemoryMapping,
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
-    static_analysis::Analysis,
+    static_analysis::{Analysis, TraceLogEntry},
 };
-use std::{collections::BTreeMap, fmt::Debug};
+use std::{
+    collections::BTreeMap,
+    env::var_os,
+    fmt::Debug,
+    fs::{create_dir_all, write},
+    path::{Path, PathBuf},
+};
 
 #[cfg(not(feature = "shuttle-test"))]
 use {
@@ -34,6 +40,9 @@ use shuttle::{
     rand::{thread_rng, Rng},
     sync::Arc,
 };
+
+/// `SBF_TRACE_DIR` environment variable name
+pub const SBF_TRACE_DIR: &str = "SBF_TRACE_DIR";
 
 /// Shift the RUNTIME_ENVIRONMENT_KEY by this many bits to the LSB
 ///
@@ -63,7 +72,7 @@ pub struct Config {
     /// Enable instruction meter and limiting
     pub enable_instruction_meter: bool,
     /// Enable instruction tracing
-    pub enable_instruction_tracing: bool,
+    pub enable_instruction_tracing_write_only: bool,
     /// Enable dynamic string allocation for labels
     pub enable_symbol_and_section_labels: bool,
     /// Reject ELF files containing issues that the verifier did not catch before (up to v0.2.21)
@@ -85,6 +94,12 @@ impl Config {
     pub fn stack_size(&self) -> usize {
         self.stack_frame_size * self.max_call_depth
     }
+
+    /// Returns true if either the `enable_instruction_tracing` field or the `SBF_TRACE_DIR`
+    /// environment variable is set
+    pub fn instruction_tracing_enabled(&self) -> bool {
+        self.enable_instruction_tracing_write_only || var_os(SBF_TRACE_DIR).is_some()
+    }
 }
 
 impl Default for Config {
@@ -96,7 +111,7 @@ impl Default for Config {
             enable_stack_frame_gaps: true,
             instruction_meter_checkpoint_distance: 10000,
             enable_instruction_meter: true,
-            enable_instruction_tracing: false,
+            enable_instruction_tracing_write_only: false,
             enable_symbol_and_section_labels: false,
             reject_broken_elfs: false,
             noop_instruction_rate: 256,
@@ -131,6 +146,8 @@ impl<C: ContextObject> Executable<C> {
 pub trait ContextObject {
     /// Called for every instruction executed when tracing is enabled
     fn trace(&mut self, state: [u64; 12]);
+    /// Called just before [`EbpfVm::execute_program`] returns
+    fn write_trace(&self, path: impl AsRef<Path>) -> std::io::Result<()>;
     /// Consume instructions from meter
     fn consume(&mut self, amount: u64);
     /// Get the number of remaining instructions allowed
@@ -368,7 +385,9 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
                     .ok_or_else(|| EbpfError::JitNotCompiled)
                 {
                     Ok(compiled_program) => compiled_program,
-                    Err(error) => return (0, ProgramResult::Err(error)),
+                    Err(error) => {
+                        return (0, ProgramResult::Err(error));
+                    }
                 };
                 compiled_program.invoke(config, self, self.registers);
             }
@@ -385,7 +404,47 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         };
         let mut result = ProgramResult::Ok(0);
         std::mem::swap(&mut result, &mut self.program_result);
+        if executable.get_config().instruction_tracing_enabled() {
+            self.write_trace();
+        }
         (instruction_count, result)
+    }
+
+    fn write_trace(&self) {
+        let Some(dir) = var_os(SBF_TRACE_DIR) else {
+            eprintln!("Warning: `{SBF_TRACE_DIR}` is unset");
+            return;
+        };
+
+        let dir = PathBuf::from(dir);
+
+        create_dir_all(&dir).unwrap_or_default();
+
+        let tempfile = match tempfile::Builder::new()
+            .prefix("pcs-")
+            .suffix(".data")
+            .tempfile_in(&dir)
+        {
+            Ok(tempfile) => tempfile,
+            Err(error) => {
+                eprintln!("Failed to create trace file in {dir:?}: {error:?}");
+                return;
+            }
+        };
+
+        if let Err(error) = self.context_object_pointer.write_trace(tempfile.path()) {
+            eprintln!(
+                "Failed to write trace to {:?}: {:?}",
+                tempfile.path(),
+                error
+            );
+        }
+
+        let path = tempfile.path().to_path_buf();
+
+        if let Err(error) = tempfile.keep() {
+            eprintln!("Failed to persist trace file {path:?}: {error:?}");
+        }
     }
 
     /// Invokes a built-in function
@@ -404,4 +463,21 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
             self.registers[5],
         );
     }
+}
+
+/// Extracts the program counters from `trace_log` and writes them to `path`
+///
+/// Per the [`TraceLogEntry`] documentation, the last register is the program counter.
+pub fn write_trace(trace_log: &[TraceLogEntry], path: impl AsRef<Path>) -> std::io::Result<()> {
+    let pcs = trace_log
+        .iter()
+        .map(|regs| {
+            let pc = regs.last().unwrap();
+            pc.to_le_bytes()
+        })
+        .collect::<Vec<_>>();
+    let data = pcs.as_ptr() as *const u8;
+    let len = pcs.len();
+    let bytes = unsafe { std::slice::from_raw_parts(data, len * size_of::<u64>()) };
+    write(path, bytes)
 }

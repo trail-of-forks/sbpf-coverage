@@ -435,7 +435,7 @@ fn test_ins(v0: bool, ins: String, prng: &mut SmallRng, cu: u64) {
     );
 
     let mut config = Config {
-        enable_instruction_tracing: true,
+        enable_instruction_tracing_write_only: true,
         ..Config::default()
     };
     if v0 {

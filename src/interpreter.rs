@@ -187,7 +187,7 @@ impl<'a, 'b, C: ContextObject> Interpreter<'a, 'b, C> {
         let dst = insn.dst as usize;
         let src = insn.src as usize;
 
-        if config.enable_instruction_tracing {
+        if config.instruction_tracing_enabled() {
             self.vm.context_object_pointer.trace(self.reg);
         }
 

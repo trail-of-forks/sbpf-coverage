@@ -25,13 +25,19 @@ combine = "3.8.1"
 gdbstub = { version = "0.6.2", optional = true }
 hash32 = "0.2.0"
 log = "0.4.2"
-rand = { version = "0.8.5", features = ["small_rng"]}
+rand = { version = "0.8.5", features = ["small_rng"] }
 rustc-demangle = "0.1"
 shuttle = { version = "0.7.1", optional = true }
+tempfile = "3.19"
 thiserror = "2.0.9"
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["memoryapi", "sysinfoapi", "winnt", "errhandlingapi"], optional = true }
+winapi = { version = "0.3", features = [
+    "memoryapi",
+    "sysinfoapi",
+    "winnt",
+    "errhandlingapi",
+], optional = true }
 
 [target.'cfg(not(windows))'.dependencies]
 libc = { version = "0.2", optional = true }
@@ -48,3 +54,6 @@ shuttle-test = ["dep:shuttle"]
 elf = "0.0.10"
 json = "0.12"
 test_utils = { path = "test_utils/" }
+
+[workspace]
+members = ["test_utils"]
