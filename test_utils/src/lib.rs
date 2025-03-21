@@ -15,9 +15,8 @@ use solana_sbpf::{
     error::EbpfError,
     memory_region::{MemoryCowCallback, MemoryMapping, MemoryRegion},
     static_analysis::TraceLogEntry,
-    vm::{self, ContextObject},
+    vm::ContextObject,
 };
-use std::path::Path;
 
 pub mod syscalls;
 
@@ -35,8 +34,8 @@ impl ContextObject for TestContextObject {
         self.trace_log.push(state);
     }
 
-    fn write_trace(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
-        vm::write_trace(&self.trace_log, path)
+    fn get_trace_log(&self) -> Option<&[[u64; 12]]> {
+        Some(&self.trace_log)
     }
 
     fn consume(&mut self, amount: u64) {

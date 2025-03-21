@@ -146,8 +146,10 @@ impl<C: ContextObject> Executable<C> {
 pub trait ContextObject {
     /// Called for every instruction executed when tracing is enabled
     fn trace(&mut self, state: [u64; 12]);
-    /// Called just before [`EbpfVm::execute_program`] returns
-    fn write_trace(&self, path: impl AsRef<Path>) -> std::io::Result<()>;
+    /// Returns a reference to the trace log entries accumulated by `trace`
+    fn get_trace_log(&self) -> Option<&[[u64; 12]]> {
+        None
+    }
     /// Consume instructions from meter
     fn consume(&mut self, amount: u64);
     /// Get the number of remaining instructions allowed
@@ -304,6 +306,8 @@ pub struct EbpfVm<'a, C: ContextObject> {
     pub call_frames: Vec<CallFrame>,
     /// Loader built-in program
     pub loader: Arc<BuiltinProgram<C>>,
+    /// Trace log in case ContextObject does not supply one
+    pub trace_log: Option<Vec<[u64; 12]>>,
     /// TCP port for the debugger interface
     #[cfg(feature = "debugger")]
     pub debug_port: Option<u16>,
@@ -331,6 +335,11 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         if !config.enable_address_translation {
             memory_mapping = MemoryMapping::new_identity();
         }
+        let trace_log = if context_object.get_trace_log().is_some() {
+            None
+        } else {
+            Some(Vec::new())
+        };
         EbpfVm {
             host_stack_pointer: std::ptr::null_mut(),
             call_depth: 0,
@@ -344,6 +353,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
             memory_mapping,
             call_frames: vec![CallFrame::default(); config.max_call_depth],
             loader,
+            trace_log,
             #[cfg(feature = "debugger")]
             debug_port: None,
         }
@@ -365,6 +375,12 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         self.previous_instruction_meter = initial_insn_count;
         self.due_insn_count = 0;
         self.program_result = ProgramResult::Ok(0);
+        let interpreted = {
+            if !interpreted {
+                eprintln!("Warning: executing program interpreted");
+            }
+            true
+        };
         if interpreted {
             #[cfg(feature = "debugger")]
             let debug_port = self.debug_port.clone();
@@ -404,13 +420,26 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         };
         let mut result = ProgramResult::Ok(0);
         std::mem::swap(&mut result, &mut self.program_result);
-        if executable.get_config().instruction_tracing_enabled() {
-            self.write_trace();
-        }
+        self.write_trace(executable);
         (instruction_count, result)
     }
 
-    fn write_trace(&self) {
+    /// Logs the registers in `state` if instruction tracing is enabled
+    pub fn trace(&mut self, executable: &Executable<C>, state: [u64; 12]) {
+        if !executable.get_config().instruction_tracing_enabled() {
+            return;
+        }
+        if let Some(trace_log) = &mut self.trace_log {
+            trace_log.push(state.clone());
+        }
+        self.context_object_pointer.trace(state);
+    }
+
+    fn write_trace(&self, executable: &Executable<C>) {
+        if !executable.get_config().instruction_tracing_enabled() {
+            return;
+        }
+
         let Some(dir) = var_os(SBF_TRACE_DIR) else {
             eprintln!("Warning: `{SBF_TRACE_DIR}` is unset");
             return;
@@ -432,7 +461,14 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
             }
         };
 
-        if let Err(error) = self.context_object_pointer.write_trace(tempfile.path()) {
+        let trace_log = self
+            .trace_log
+            .as_ref()
+            .map(Vec::as_slice)
+            .ok_or_else(|| self.context_object_pointer.get_trace_log())
+            .unwrap();
+
+        if let Err(error) = write_trace(trace_log, tempfile.path()) {
             eprintln!(
                 "Failed to write trace to {:?}: {:?}",
                 tempfile.path(),

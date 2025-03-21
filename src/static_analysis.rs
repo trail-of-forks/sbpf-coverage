@@ -11,7 +11,6 @@ use crate::{
 };
 use rustc_demangle::demangle;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::path::Path;
 
 /// Register state recorded after executing one instruction
 ///
@@ -129,10 +128,6 @@ struct DummyContextObject {}
 
 impl ContextObject for DummyContextObject {
     fn trace(&mut self, _state: [u64; 12]) {}
-
-    fn write_trace(&self, _path: impl AsRef<Path>) -> std::io::Result<()> {
-        Ok(())
-    }
 
     fn consume(&mut self, _amount: u64) {}
 
