@@ -21,6 +21,7 @@ use crate::{
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
     static_analysis::Analysis,
 };
+use sha1::{Digest, Sha1};
 use std::{
     collections::BTreeMap,
     env::var_os,
@@ -428,20 +429,9 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
 
         create_dir_all(&dir).unwrap_or_default();
 
-        let tempfile = match tempfile::Builder::new()
-            .prefix("")
-            .suffix(".pcs")
-            .keep(true)
-            .tempfile_in(&dir)
-        {
-            Ok(tempfile) => tempfile,
-            Err(error) => {
-                eprintln!("Failed to create tempfile in {dir:?}: {error:?}");
-                return;
-            }
-        };
-
-        let base = tempfile.into_temp_path();
+        let digest = Sha1::digest(as_bytes(&self.pcs));
+        let hex = hex::encode(digest);
+        let base = dir.join(hex);
 
         if let Err(error) = write_pcs(&self.pcs, &base) {
             eprintln!("Failed to write trace log: {error:?}");
@@ -479,18 +469,18 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
 
 /// Writes the executed program counters to a file
 pub fn write_pcs(pcs: &[u64], base: impl AsRef<Path>) -> std::io::Result<()> {
-    let data = pcs.as_ptr() as *const u8;
-    let len = pcs.len();
-    let bytes = unsafe { std::slice::from_raw_parts(data, len * size_of::<u64>()) };
-    write(base.as_ref().with_extension("pcs"), bytes)
+    write(base.as_ref().with_extension("pcs"), as_bytes(pcs))
 }
 
 /// Writes the executed instructions to a file
 pub fn write_instructions(insns: &[u64], base: impl AsRef<Path>) -> std::io::Result<()> {
-    let data = insns.as_ptr() as *const u8;
-    let len = insns.len();
-    let bytes = unsafe { std::slice::from_raw_parts(data, len * size_of::<u64>()) };
-    write(base.as_ref().with_extension("insns"), bytes)
+    write(base.as_ref().with_extension("insns"), as_bytes(insns))
+}
+
+fn as_bytes(slice: &[u64]) -> &[u8] {
+    let data = slice.as_ptr() as *const u8;
+    let len = slice.len();
+    unsafe { std::slice::from_raw_parts(data, len * size_of::<u64>()) }
 }
 
 /// Writes the summary to a file
