@@ -21,7 +21,7 @@ use crate::{
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
     static_analysis::Analysis,
 };
-use sha1::{Digest, Sha1};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     env::var_os,
@@ -421,6 +421,8 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
     }
 
     fn write_coverage_files(&self, executable: &Executable<C>) {
+        const HEX_LEN: usize = 16;
+
         let Some(dir) = var_os(SBF_TRACE_DIR) else {
             return;
         };
@@ -429,8 +431,8 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
 
         create_dir_all(&dir).unwrap_or_default();
 
-        let digest = Sha1::digest(as_bytes(&self.pcs));
-        let hex = hex::encode(digest);
+        let digest = Sha256::digest(as_bytes(&self.pcs));
+        let hex = hex::encode(digest)[..HEX_LEN].to_string();
         let base = dir.join(hex);
 
         if let Err(error) = write_pcs(&self.pcs, &base) {

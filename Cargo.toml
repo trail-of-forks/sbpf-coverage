@@ -28,7 +28,7 @@ hex = "0.4"
 log = "0.4.2"
 rand = { version = "0.8.5", features = ["small_rng"] }
 rustc-demangle = "0.1"
-sha1 = "0.10"
+sha2 = "0.10"
 shuttle = { version = "0.7.1", optional = true }
 thiserror = "2.0.9"
 
