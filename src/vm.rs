@@ -14,14 +14,22 @@
 
 use crate::{
     ebpf,
-    elf::Executable,
+    elf::{Executable, ExecutableSummary},
     error::{EbpfError, ProgramResult},
     interpreter::Interpreter,
     memory_region::MemoryMapping,
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
     static_analysis::{Analysis, RegisterTraceEntry},
 };
-use std::{collections::BTreeMap, fmt::Debug};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::BTreeMap,
+    env::var_os,
+    fmt::Debug,
+    fs::{create_dir_all, write, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 #[cfg(feature = "shuttle-test")]
 use shuttle::sync::Arc;
@@ -32,6 +40,9 @@ use std::sync::Arc;
 use rand::{thread_rng, Rng};
 #[cfg(all(feature = "jit", feature = "shuttle-test"))]
 use shuttle::rand::{thread_rng, Rng};
+
+/// `SBF_TRACE_DIR` environment variable name
+pub const SBF_TRACE_DIR: &str = "SBF_TRACE_DIR";
 
 /// Shift the RUNTIME_ENVIRONMENT_KEY by this many bits to the LSB
 ///
@@ -299,6 +310,8 @@ pub struct EbpfVm<'a, C: ContextObject> {
     pub loader: Arc<BuiltinProgram<C>>,
     /// Collector for the instruction trace
     pub register_trace: Vec<RegisterTraceEntry>,
+    /// Instructions that were executed
+    pub insns: Vec<u64>,
     /// TCP port for the debugger interface
     #[cfg(feature = "debugger")]
     pub debug_port: Option<u16>,
@@ -326,6 +339,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         if !config.enable_address_translation {
             memory_mapping = MemoryMapping::new_identity();
         }
+        let insns = Vec::new();
         EbpfVm {
             host_stack_pointer: std::ptr::null_mut(),
             call_depth: 0,
@@ -339,6 +353,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
             memory_mapping,
             call_frames: vec![CallFrame::default(); config.max_call_depth],
             loader,
+            insns,
             #[cfg(feature = "debugger")]
             debug_port: std::env::var("VM_DEBUG_PORT")
                 .ok()
@@ -362,6 +377,16 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         self.previous_instruction_meter = initial_insn_count;
         self.due_insn_count = 0;
         self.program_result = ProgramResult::Ok(0);
+        let interpreted = if interpreted {
+            true
+        } else if coverage_enabled() {
+            if !interpreted {
+                eprintln!("Warning: executing program interpreted");
+            }
+            true
+        } else {
+            false
+        };
         if interpreted {
             #[cfg(feature = "debugger")]
             let debug_port = self.debug_port.clone();
@@ -382,7 +407,9 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
                     .ok_or_else(|| EbpfError::JitNotCompiled)
                 {
                     Ok(compiled_program) => compiled_program,
-                    Err(error) => return (0, ProgramResult::Err(error)),
+                    Err(error) => {
+                        return (0, ProgramResult::Err(error));
+                    }
                 };
                 compiled_program.invoke(config, self, self.registers);
             }
@@ -399,7 +426,47 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         };
         let mut result = ProgramResult::Ok(0);
         std::mem::swap(&mut result, &mut self.program_result);
+        self.write_coverage_files(executable);
         (instruction_count, result)
+    }
+
+    #[allow(clippy::needless_return)]
+    fn write_coverage_files(&self, executable: &Executable<C>) {
+        const FILE_STEM_LEN: usize = 16;
+
+        let Some(dir) = var_os(SBF_TRACE_DIR) else {
+            return;
+        };
+
+        let dir = PathBuf::from(dir);
+
+        create_dir_all(&dir).unwrap_or_default();
+
+        let pcs = self
+            .register_trace
+            .iter()
+            .map(|reg| reg[11])
+            .collect::<Vec<_>>();
+
+        let digest = Sha256::digest(as_bytes(&pcs));
+        let hex = hex::encode(digest);
+        let file_stem = &hex[..FILE_STEM_LEN];
+        let base = dir.join(file_stem);
+
+        if let Err(error) = write_pcs(&pcs, &base) {
+            eprintln!("Failed to write trace log: {error:?}");
+            return;
+        }
+
+        if let Err(error) = write_instructions(&self.insns, &base) {
+            eprintln!("Failed to write instruction log: {error:?}");
+            return;
+        }
+
+        if let Err(error) = write_summary(executable, &base) {
+            eprintln!("Failed to write summary: {error:?}");
+            return;
+        }
     }
 
     /// Invokes a built-in function
@@ -418,4 +485,39 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
             self.registers[5],
         );
     }
+}
+
+/// Writes the executed program counters to a file
+pub fn write_pcs(pcs: &[u64], base: impl AsRef<Path>) -> std::io::Result<()> {
+    write(base.as_ref().with_extension("pcs"), as_bytes(pcs))
+}
+
+/// Writes the executed instructions to a file
+pub fn write_instructions(insns: &[u64], base: impl AsRef<Path>) -> std::io::Result<()> {
+    write(base.as_ref().with_extension("insns"), as_bytes(insns))
+}
+
+fn as_bytes(slice: &[u64]) -> &[u8] {
+    let data = slice.as_ptr().cast::<u8>();
+    let size = std::mem::size_of_val(slice);
+    unsafe { std::slice::from_raw_parts::<u8>(data, size) }
+}
+
+/// Writes the summary to a file
+pub fn write_summary<C: ContextObject>(
+    executable: &Executable<C>,
+    base: impl AsRef<Path>,
+) -> std::io::Result<()> {
+    let mut summary_file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(base.as_ref().with_extension("summary"))?;
+
+    writeln!(summary_file, "{:#?}", ExecutableSummary::new(executable))
+}
+
+/// Whether coverage is enabled, i.e., whether the `SBF_TRACE_DIR` environment variable is set
+pub fn coverage_enabled() -> bool {
+    var_os(SBF_TRACE_DIR).is_some()
 }

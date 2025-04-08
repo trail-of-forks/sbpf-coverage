@@ -7,7 +7,7 @@
 // this loader will need to be re-written to use the program headers instead.
 
 use crate::{
-    aligned_memory::{is_memory_aligned, AlignedMemory},
+    aligned_memory::{is_memory_aligned, AlignedMemory, AlignedMemorySummary},
     ebpf::{self, HOST_ALIGN, INSN_SIZE},
     elf_parser::{
         consts::{
@@ -19,7 +19,8 @@ use crate::{
     },
     error::EbpfError,
     memory_region::MemoryRegion,
-    program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
+    program::{BuiltinProgram, FunctionRegistry, FunctionRegistrySummary, SBPFVersion},
+    vaddr::Vaddr,
     verifier::Verifier,
     vm::{Config, ContextObject},
 };
@@ -1173,4 +1174,61 @@ pub fn get_ro_region(ro_section: &Section, elf: &[u8]) -> MemoryRegion {
     // the first read only byte. [MM_RODATA_START, MM_RODATA_START + offset)
     // will be unmappable, see MemoryRegion::vm_to_host.
     MemoryRegion::new_readonly(ro_data, offset as u64)
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum SectionSummary {
+    Owned(Vaddr),
+    Borrowed(Vaddr),
+}
+
+impl SectionSummary {
+    pub(crate) fn new(section: &Section) -> Self {
+        match section {
+            Section::Owned(vaddr, _) => Self::Owned(Vaddr::from(*vaddr)),
+            Section::Borrowed(vaddr, _) => Self::Borrowed(Vaddr::from(*vaddr)),
+        }
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+pub(crate) struct ExecutableSummary {
+    pub(crate) elf_bytes: AlignedMemorySummary<{ HOST_ALIGN }>,
+    pub(crate) sbpf_version: SBPFVersion,
+    pub(crate) ro_section: SectionSummary,
+    pub(crate) text_section_vaddr: Vaddr,
+    pub(crate) text_section_range: Range<Vaddr>,
+    pub(crate) entry_pc: Vaddr,
+    pub(crate) function_registry: FunctionRegistrySummary,
+}
+
+impl ExecutableSummary {
+    pub(crate) fn new<C: ContextObject>(executable: &Executable<C>) -> Self {
+        let Executable {
+            elf_bytes,
+            sbpf_version,
+            ro_section,
+            text_section_vaddr,
+            text_section_range: Range { start, end },
+            entry_pc,
+            function_registry,
+            loader: _,
+            #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+                compiled_program: _,
+        } = executable;
+        Self {
+            elf_bytes: AlignedMemorySummary::new(elf_bytes),
+            sbpf_version: *sbpf_version,
+            ro_section: SectionSummary::new(ro_section),
+            text_section_vaddr: Vaddr::from(*text_section_vaddr as usize),
+            text_section_range: Range {
+                start: Vaddr::from(*start),
+                end: Vaddr::from(*end),
+            },
+            entry_pc: Vaddr::from(*entry_pc),
+            function_registry: FunctionRegistrySummary::new(function_registry),
+        }
+    }
 }
