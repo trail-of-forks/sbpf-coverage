@@ -1,5 +1,6 @@
 //! Aligned memory
 
+use crate::vaddr::Vaddr;
 use std::{mem, ptr};
 
 /// Scalar types, aka "plain old data"
@@ -210,6 +211,30 @@ pub fn is_memory_aligned(ptr: usize, align: usize) -> bool {
     ptr.checked_rem(align)
         .map(|remainder| remainder == 0)
         .unwrap_or(false)
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AlignedMemorySummary<const ALIGN: usize> {
+    pub(crate) max_len: Vaddr,
+    pub(crate) align_offset: Vaddr,
+    pub(crate) zero_up_to_max_len: bool,
+}
+
+impl<const ALIGN: usize> AlignedMemorySummary<ALIGN> {
+    pub(crate) fn new(aligned_memory: &AlignedMemory<ALIGN>) -> Self {
+        let AlignedMemory {
+            max_len,
+            align_offset,
+            mem: _,
+            zero_up_to_max_len,
+        } = aligned_memory;
+        Self {
+            max_len: Vaddr::from(*max_len),
+            align_offset: Vaddr::from(*align_offset),
+            zero_up_to_max_len: *zero_up_to_max_len,
+        }
+    }
 }
 
 #[allow(clippy::arithmetic_side_effects)]

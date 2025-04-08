@@ -24,14 +24,21 @@ byteorder = "1.2"
 combine = "3.8.1"
 gdbstub = { version = "0.6.2", optional = true }
 hash32 = "0.3.1"
+hex = "0.4"
 log = "0.4.2"
 rand = { version = "0.8.5", features = ["small_rng"], optional = true }
 rustc-demangle = "0.1"
+sha2 = "0.10"
 shuttle = { version = "0.7.1", optional = true }
 thiserror = "2.0.9"
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["memoryapi", "sysinfoapi", "winnt", "errhandlingapi"], optional = true }
+winapi = { version = "0.3", features = [
+    "memoryapi",
+    "sysinfoapi",
+    "winnt",
+    "errhandlingapi",
+], optional = true }
 
 [target.'cfg(not(windows))'.dependencies]
 libc = { version = "0.2", optional = true }
