@@ -3,6 +3,7 @@ use {
     crate::{
         ebpf,
         elf::ElfError,
+        vaddr::Vaddr,
         vm::{Config, ContextObject, EbpfVm},
     },
     std::collections::{btree_map::Entry, BTreeMap},
@@ -363,4 +364,25 @@ macro_rules! declare_builtin_function {
             }
         }
     };
+}
+
+/// Summary of a `FunctionRegistry` to aid in debugging
+#[allow(dead_code)]
+#[derive(Debug)]
+pub struct FunctionRegistrySummary {
+    pub(crate) map: BTreeMap<String, Vaddr>,
+}
+
+impl FunctionRegistrySummary {
+    pub(crate) fn new(function_registry: &FunctionRegistry<usize>) -> Self {
+        let map = function_registry
+            .map
+            .iter()
+            .map(|(_, (name, vaddr))| {
+                let name = String::from_utf8_lossy(name).to_string();
+                (name, Vaddr::from(*vaddr))
+            })
+            .collect();
+        Self { map }
+    }
 }

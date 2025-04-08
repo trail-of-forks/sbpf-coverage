@@ -17,8 +17,9 @@ use crate::{
     elf::Executable,
     error::{EbpfError, ProgramResult},
     program::BuiltinFunction,
-    vm::{Config, ContextObject, EbpfVm},
+    vm::{coverage_enabled, Config, ContextObject, EbpfVm},
 };
+use std::convert::TryFrom;
 
 /// Virtual memory operation helper.
 macro_rules! translate_memory_access {
@@ -189,6 +190,13 @@ impl<'a, 'b, C: ContextObject> Interpreter<'a, 'b, C> {
 
         if config.enable_register_tracing {
             self.vm.register_trace.push(self.reg);
+        }
+
+        if coverage_enabled() {
+            let start = self.reg[11] as usize * ebpf::INSN_SIZE;
+            let end = next_pc as usize * ebpf::INSN_SIZE;
+            let insn = u64::from_le_bytes(<[u8; 8]>::try_from(&self.program[start..end]).unwrap());
+            self.vm.insns.push(insn);
         }
 
         match insn.opc {
