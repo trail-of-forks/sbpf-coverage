@@ -290,12 +290,16 @@ impl<'a> UnalignedMemoryMapping<'a> {
     }
 
     #[allow(clippy::arithmetic_side_effects)]
-    fn find_region(&self, cache: &mut MappingCache, vm_addr: u64) -> Option<&MemoryRegion> {
+    fn find_region(
+        &self,
+        cache: &mut MappingCache,
+        vm_addr: u64,
+    ) -> Option<(usize, &MemoryRegion)> {
         if let Some(index) = cache.find(vm_addr) {
             // Safety:
             // Cached index, we validated it before caching it. See the corresponding safety section
             // in the miss branch.
-            Some(unsafe { self.regions.get_unchecked(index - 1) })
+            Some((index - 1, unsafe { self.regions.get_unchecked(index - 1) }))
         } else {
             let mut index = 1;
             while index <= self.region_addresses.len() {
@@ -315,7 +319,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
             // must be contained in region
             let region = unsafe { self.regions.get_unchecked(index - 1) };
             cache.insert(region.vm_addr..region.vm_addr_end, index);
-            Some(region)
+            Some((index - 1, region))
         }
     }
 
@@ -328,7 +332,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
         let cache = unsafe { &mut *self.cache.get() };
 
         let region = match self.find_region(cache, vm_addr) {
-            Some(res) => res,
+            Some((_region_index, region)) => region,
             None => {
                 return generate_access_violation(
                     self.config,
@@ -364,7 +368,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
         let cache = unsafe { &mut *self.cache.get() };
 
         let mut region = match self.find_region(cache, vm_addr) {
-            Some(region) => {
+            Some((_region_index, region)) => {
                 if let Some(host_addr) = region.vm_to_host(vm_addr, len) {
                     // fast path
                     return ProgramResult::Ok(unsafe {
@@ -410,7 +414,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
                 }
                 vm_addr = vm_addr.saturating_add(load_len);
                 region = match self.find_region(cache, vm_addr) {
-                    Some(region) => region,
+                    Some((_region_index, region)) => region,
                     None => break,
                 };
             } else {
@@ -443,7 +447,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
         let mut src = std::ptr::addr_of!(value).cast::<u8>();
 
         let mut region = match self.find_region(cache, vm_addr) {
-            Some(region) if ensure_writable_region(region, &self.cow_cb) => {
+            Some((_region_index, region)) if ensure_writable_region(region, &self.cow_cb) => {
                 // fast path
                 if let Some(host_addr) = region.vm_to_host(vm_addr, len) {
                     // Safety:
@@ -489,7 +493,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
                 src = unsafe { src.add(write_len as usize) };
                 vm_addr = vm_addr.saturating_add(write_len);
                 region = match self.find_region(cache, vm_addr) {
-                    Some(region) => region,
+                    Some((_region_index, region)) => region,
                     None => break,
                 };
             } else {
@@ -511,17 +515,17 @@ impl<'a> UnalignedMemoryMapping<'a> {
         &self,
         access_type: AccessType,
         vm_addr: u64,
-    ) -> Result<&MemoryRegion, EbpfError> {
+    ) -> Result<(usize, &MemoryRegion), EbpfError> {
         // Safety:
         // &mut references to the mapping cache are only created internally from methods that do not
         // invoke each other. UnalignedMemoryMapping is !Sync, so the cache reference below is
         // guaranteed to be unique.
         let cache = unsafe { &mut *self.cache.get() };
-        if let Some(region) = self.find_region(cache, vm_addr) {
+        if let Some((region_index, region)) = self.find_region(cache, vm_addr) {
             if (region.vm_addr..region.vm_addr_end).contains(&vm_addr)
                 && (access_type == AccessType::Load || ensure_writable_region(region, &self.cow_cb))
             {
-                return Ok(region);
+                return Ok((region_index, region));
             }
         }
         Err(
@@ -681,7 +685,7 @@ impl<'a> AlignedMemoryMapping<'a> {
         &self,
         access_type: AccessType,
         vm_addr: u64,
-    ) -> Result<&MemoryRegion, EbpfError> {
+    ) -> Result<(usize, &MemoryRegion), EbpfError> {
         let index = vm_addr
             .checked_shr(ebpf::VIRTUAL_ADDRESS_BITS as u32)
             .unwrap_or(0) as usize;
@@ -690,7 +694,7 @@ impl<'a> AlignedMemoryMapping<'a> {
             if (region.vm_addr..region.vm_addr_end).contains(&vm_addr)
                 && (access_type == AccessType::Load || ensure_writable_region(region, &self.cow_cb))
             {
-                return Ok(region);
+                return Ok((index, region));
             }
         }
         Err(
@@ -821,7 +825,7 @@ impl<'a> MemoryMapping<'a> {
         &self,
         access_type: AccessType,
         vm_addr: u64,
-    ) -> Result<&MemoryRegion, EbpfError> {
+    ) -> Result<(usize, &MemoryRegion), EbpfError> {
         match self {
             MemoryMapping::Identity => Err(EbpfError::InvalidMemoryRegion(0)),
             MemoryMapping::Aligned(m) => m.region(access_type, vm_addr),
@@ -1201,6 +1205,7 @@ mod test {
         assert_eq!(
             m.region(AccessType::Load, ebpf::MM_INPUT_START)
                 .unwrap()
+                .1
                 .host_addr
                 .get(),
             mem1.as_ptr() as u64
@@ -1208,6 +1213,7 @@ mod test {
         assert_eq!(
             m.region(AccessType::Load, ebpf::MM_INPUT_START + 3)
                 .unwrap()
+                .1
                 .host_addr
                 .get(),
             mem1.as_ptr() as u64
@@ -1219,6 +1225,7 @@ mod test {
         assert_eq!(
             m.region(AccessType::Load, ebpf::MM_INPUT_START + 4)
                 .unwrap()
+                .1
                 .host_addr
                 .get(),
             mem2.as_ptr() as u64
@@ -1226,6 +1233,7 @@ mod test {
         assert_eq!(
             m.region(AccessType::Load, ebpf::MM_INPUT_START + 7)
                 .unwrap()
+                .1
                 .host_addr
                 .get(),
             mem2.as_ptr() as u64
@@ -1261,6 +1269,7 @@ mod test {
         assert_eq!(
             m.region(AccessType::Load, ebpf::MM_RODATA_START)
                 .unwrap()
+                .1
                 .host_addr
                 .get(),
             mem1.as_ptr() as u64
@@ -1268,6 +1277,7 @@ mod test {
         assert_eq!(
             m.region(AccessType::Load, ebpf::MM_RODATA_START + 3)
                 .unwrap()
+                .1
                 .host_addr
                 .get(),
             mem1.as_ptr() as u64
@@ -1284,6 +1294,7 @@ mod test {
         assert_eq!(
             m.region(AccessType::Load, ebpf::MM_STACK_START)
                 .unwrap()
+                .1
                 .host_addr
                 .get(),
             mem2.as_ptr() as u64
@@ -1291,6 +1302,7 @@ mod test {
         assert_eq!(
             m.region(AccessType::Load, ebpf::MM_STACK_START + 3)
                 .unwrap()
+                .1
                 .host_addr
                 .get(),
             mem2.as_ptr() as u64
