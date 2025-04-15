@@ -32,21 +32,13 @@ use std::{
     Host:  frame 0 | frame 1 | frame 2 | ...
 */
 
-/// The state of a memory region.
-#[derive(Debug, Copy, Clone, Default, Eq, PartialEq)]
-pub enum MemoryState {
-    /// The memory region is readable
-    #[default]
-    Readable,
-    /// The memory region is writable
-    Writable,
-    /// The memory region is writable but must be copied before writing. The
-    /// carried data can be used to uniquely identify the region.
-    Cow(u64),
+/// Callback executed before generate_access_violation()
+pub type MemoryCowCallback = Box<dyn Fn(u32) -> Result<u64, ()>>;
+/// Fail always
+#[allow(clippy::result_unit_err)]
+pub fn default_memory_cow_callback(_cow_callback_payload: u32) -> Result<u64, ()> {
+    Err(())
 }
-
-/// Callback executed when a CoW memory region is written to
-pub type MemoryCowCallback = Box<dyn Fn(u64) -> Result<u64, ()>>;
 
 /// Memory region for bounds checking and address translation
 #[derive(Default, Eq, PartialEq)]
@@ -62,12 +54,14 @@ pub struct MemoryRegion {
     pub len: u64,
     /// Size of regular gaps as bit shift (63 means this region is continuous)
     pub vm_gap_shift: u8,
-    /// Whether the region is readonly, writable or must be copied before writing
-    pub state: Cell<MemoryState>,
+    /// Is `AccessType::Store` allowed without triggering an access violation
+    pub writable: Cell<bool>,
+    /// User defined payload for the [MemoryCowCallback]
+    pub cow_callback_payload: u32,
 }
 
 impl MemoryRegion {
-    fn new(slice: &[u8], vm_addr: u64, vm_gap_size: u64, state: MemoryState) -> Self {
+    fn new(slice: &[u8], vm_addr: u64, vm_gap_size: u64, writable: bool) -> Self {
         let mut vm_addr_end = vm_addr.saturating_add(slice.len() as u64);
         let mut vm_gap_shift = (std::mem::size_of::<u64>() as u8)
             .saturating_mul(8)
@@ -83,40 +77,29 @@ impl MemoryRegion {
             vm_addr_end,
             len: slice.len() as u64,
             vm_gap_shift,
-            state: Cell::new(state),
+            writable: Cell::new(writable),
+            cow_callback_payload: u32::MAX,
         }
     }
 
     /// Only to be used in tests and benches
-    pub fn new_for_testing(
-        slice: &[u8],
-        vm_addr: u64,
-        vm_gap_size: u64,
-        state: MemoryState,
-    ) -> Self {
-        Self::new(slice, vm_addr, vm_gap_size, state)
+    pub fn new_for_testing(slice: &[u8], vm_addr: u64, vm_gap_size: u64, writable: bool) -> Self {
+        Self::new(slice, vm_addr, vm_gap_size, writable)
     }
 
     /// Creates a new readonly MemoryRegion from a slice
     pub fn new_readonly(slice: &[u8], vm_addr: u64) -> Self {
-        Self::new(slice, vm_addr, 0, MemoryState::Readable)
+        Self::new(slice, vm_addr, 0, false)
     }
 
     /// Creates a new writable MemoryRegion from a mutable slice
     pub fn new_writable(slice: &mut [u8], vm_addr: u64) -> Self {
-        Self::new(&*slice, vm_addr, 0, MemoryState::Writable)
-    }
-
-    /// Creates a new copy on write MemoryRegion.
-    ///
-    /// The region is made writable
-    pub fn new_cow(slice: &[u8], vm_addr: u64, cow_id: u64) -> Self {
-        Self::new(slice, vm_addr, 0, MemoryState::Cow(cow_id))
+        Self::new(&*slice, vm_addr, 0, true)
     }
 
     /// Creates a new writable gapped MemoryRegion from a mutable slice
     pub fn new_writable_gapped(slice: &mut [u8], vm_addr: u64, vm_gap_size: u64) -> Self {
-        Self::new(&*slice, vm_addr, vm_gap_size, MemoryState::Writable)
+        Self::new(&*slice, vm_addr, vm_gap_size, true)
     }
 
     /// Convert a virtual machine address into a host address
@@ -150,12 +133,13 @@ impl fmt::Debug for MemoryRegion {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "host_addr: {:#x?}-{:#x?}, vm_addr: {:#x?}-{:#x?}, len: {}",
+            "host_addr: {:#x?}-{:#x?}, vm_addr: {:#x?}-{:#x?}, len: {}, writable: {}",
             self.host_addr,
             self.host_addr.get().saturating_add(self.len),
             self.vm_addr,
             self.vm_addr_end,
-            self.len
+            self.len,
+            self.writable.get(),
         )
     }
 }
@@ -191,8 +175,8 @@ pub struct UnalignedMemoryMapping<'a> {
     config: &'a Config,
     /// Executable sbpf_version
     sbpf_version: SBPFVersion,
-    /// CoW callback
-    cow_cb: Option<MemoryCowCallback>,
+    /// Access violation handler
+    cow_cb: MemoryCowCallback,
 }
 
 impl fmt::Debug for UnalignedMemoryMapping<'_> {
@@ -202,14 +186,6 @@ impl fmt::Debug for UnalignedMemoryMapping<'_> {
             .field("region_addresses", &self.region_addresses)
             .field("cache", &self.cache)
             .field("config", &self.config)
-            .field(
-                "cow_cb",
-                &self
-                    .cow_cb
-                    .as_ref()
-                    .map(|cb| format!("Some({:p})", &cb))
-                    .unwrap_or_else(|| "None".to_string()),
-            )
             .finish()
     }
 }
@@ -238,11 +214,12 @@ impl<'a> UnalignedMemoryMapping<'a> {
         )
     }
 
-    fn new_internal(
+    /// Creates a new MemoryMapping structure from the given regions
+    pub fn new_with_cow(
         mut regions: Vec<MemoryRegion>,
-        cow_cb: Option<MemoryCowCallback>,
         config: &'a Config,
         sbpf_version: SBPFVersion,
+        cow_cb: MemoryCowCallback,
     ) -> Result<Self, EbpfError> {
         regions.sort();
         for index in 1..regions.len() {
@@ -252,7 +229,6 @@ impl<'a> UnalignedMemoryMapping<'a> {
                 return Err(EbpfError::InvalidMemoryRegion(index));
             }
         }
-
         let mut result = Self {
             regions: (0..regions.len())
                 .map(|_| MemoryRegion::default())
@@ -268,25 +244,20 @@ impl<'a> UnalignedMemoryMapping<'a> {
         Ok(result)
     }
 
-    /// Creates a new UnalignedMemoryMapping structure from the given regions
+    /// Creates a new memory mapping for tests and benches.
+    ///
+    /// `cow_cb` defaults to a function which always returns an error.
     pub fn new(
         regions: Vec<MemoryRegion>,
         config: &'a Config,
         sbpf_version: SBPFVersion,
     ) -> Result<Self, EbpfError> {
-        Self::new_internal(regions, None, config, sbpf_version)
-    }
-
-    /// Creates a new UnalignedMemoryMapping from the given regions.
-    ///
-    /// `cow_cb` is used to copy CoW regions on the first write access.
-    pub fn new_with_cow(
-        regions: Vec<MemoryRegion>,
-        cow_cb: MemoryCowCallback,
-        config: &'a Config,
-        sbpf_version: SBPFVersion,
-    ) -> Result<Self, EbpfError> {
-        Self::new_internal(regions, Some(cow_cb), config, sbpf_version)
+        Self::new_with_cow(
+            regions,
+            config,
+            sbpf_version,
+            Box::new(default_memory_cow_callback),
+        )
     }
 
     #[allow(clippy::arithmetic_side_effects)]
@@ -559,8 +530,8 @@ pub struct AlignedMemoryMapping<'a> {
     config: &'a Config,
     /// Executable sbpf_version
     sbpf_version: SBPFVersion,
-    /// CoW callback
-    cow_cb: Option<MemoryCowCallback>,
+    /// Access violation handler
+    cow_cb: MemoryCowCallback,
 }
 
 impl fmt::Debug for AlignedMemoryMapping<'_> {
@@ -568,24 +539,17 @@ impl fmt::Debug for AlignedMemoryMapping<'_> {
         f.debug_struct("AlignedMemoryMapping")
             .field("regions", &self.regions)
             .field("config", &self.config)
-            .field(
-                "cow_cb",
-                &self
-                    .cow_cb
-                    .as_ref()
-                    .map(|cb| format!("Some({:p})", &cb))
-                    .unwrap_or_else(|| "None".to_string()),
-            )
             .finish()
     }
 }
 
 impl<'a> AlignedMemoryMapping<'a> {
-    fn new_internal(
+    /// Creates a new MemoryMapping structure from the given regions
+    pub fn new_with_cow(
         mut regions: Vec<MemoryRegion>,
-        cow_cb: Option<MemoryCowCallback>,
         config: &'a Config,
         sbpf_version: SBPFVersion,
+        cow_cb: MemoryCowCallback,
     ) -> Result<Self, EbpfError> {
         regions.insert(0, MemoryRegion::new_readonly(&[], 0));
         regions.sort();
@@ -607,25 +571,20 @@ impl<'a> AlignedMemoryMapping<'a> {
         })
     }
 
-    /// Creates a new MemoryMapping structure from the given regions
+    /// Creates a new memory mapping for tests and benches.
+    ///
+    /// `cow_cb` defaults to a function which always returns an error.
     pub fn new(
         regions: Vec<MemoryRegion>,
         config: &'a Config,
         sbpf_version: SBPFVersion,
     ) -> Result<Self, EbpfError> {
-        Self::new_internal(regions, None, config, sbpf_version)
-    }
-
-    /// Creates a new MemoryMapping structure from the given regions.
-    ///
-    /// `cow_cb` is used to copy CoW regions on the first write access.
-    pub fn new_with_cow(
-        regions: Vec<MemoryRegion>,
-        cow_cb: MemoryCowCallback,
-        config: &'a Config,
-        sbpf_version: SBPFVersion,
-    ) -> Result<Self, EbpfError> {
-        Self::new_internal(regions, Some(cow_cb), config, sbpf_version)
+        Self::new_with_cow(
+            regions,
+            config,
+            sbpf_version,
+            Box::new(default_memory_cow_callback),
+        )
     }
 
     /// Given a list of regions translate from virtual machine to host address
@@ -751,35 +710,35 @@ impl<'a> MemoryMapping<'a> {
     ///
     /// Uses aligned or unaligned memory mapping depending on the value of
     /// `config.aligned_memory_mapping=true`.
+    pub fn new_with_cow(
+        regions: Vec<MemoryRegion>,
+        config: &'a Config,
+        sbpf_version: SBPFVersion,
+        cow_cb: MemoryCowCallback,
+    ) -> Result<Self, EbpfError> {
+        if config.aligned_memory_mapping {
+            AlignedMemoryMapping::new_with_cow(regions, config, sbpf_version, cow_cb)
+                .map(MemoryMapping::Aligned)
+        } else {
+            UnalignedMemoryMapping::new_with_cow(regions, config, sbpf_version, cow_cb)
+                .map(MemoryMapping::Unaligned)
+        }
+    }
+
+    /// Creates a new memory mapping for tests and benches.
+    ///
+    /// `cow_cb` defaults to a function which always returns an error.
     pub fn new(
         regions: Vec<MemoryRegion>,
         config: &'a Config,
         sbpf_version: SBPFVersion,
     ) -> Result<Self, EbpfError> {
-        if config.aligned_memory_mapping {
-            AlignedMemoryMapping::new(regions, config, sbpf_version).map(MemoryMapping::Aligned)
-        } else {
-            UnalignedMemoryMapping::new(regions, config, sbpf_version).map(MemoryMapping::Unaligned)
-        }
-    }
-
-    /// Creates a new memory mapping.
-    ///
-    /// Uses aligned or unaligned memory mapping depending on the value of
-    /// `config.aligned_memory_mapping=true`. `cow_cb` is used to copy CoW memory regions.
-    pub fn new_with_cow(
-        regions: Vec<MemoryRegion>,
-        cow_cb: MemoryCowCallback,
-        config: &'a Config,
-        sbpf_version: SBPFVersion,
-    ) -> Result<Self, EbpfError> {
-        if config.aligned_memory_mapping {
-            AlignedMemoryMapping::new_with_cow(regions, cow_cb, config, sbpf_version)
-                .map(MemoryMapping::Aligned)
-        } else {
-            UnalignedMemoryMapping::new_with_cow(regions, cow_cb, config, sbpf_version)
-                .map(MemoryMapping::Unaligned)
-        }
+        Self::new_with_cow(
+            regions,
+            config,
+            sbpf_version,
+            Box::new(default_memory_cow_callback),
+        )
     }
 
     /// Map virtual memory to host memory.
@@ -854,19 +813,20 @@ impl<'a> MemoryMapping<'a> {
 
 // Ensure that the given region is writable.
 //
-// If the region is CoW, cow_cb is called to execute the CoW operation.
-fn ensure_writable_region(region: &MemoryRegion, cow_cb: &Option<MemoryCowCallback>) -> bool {
-    match (region.state.get(), cow_cb) {
-        (MemoryState::Writable, _) => true,
-        (MemoryState::Cow(cow_id), Some(cb)) => match cb(cow_id) {
-            Ok(host_addr) => {
-                region.host_addr.replace(host_addr);
-                region.state.replace(MemoryState::Writable);
-                true
-            }
-            Err(_) => false,
-        },
-        _ => false,
+// If the region is readonly, cow_cb is called.
+fn ensure_writable_region(region: &MemoryRegion, cow_cb: &MemoryCowCallback) -> bool {
+    if region.writable.get() {
+        return true;
+    }
+    if region.cow_callback_payload == u32::MAX {
+        return false;
+    }
+    if let Ok(host_addr) = cow_cb(region.cow_callback_payload) {
+        region.host_addr.replace(host_addr);
+        region.writable.replace(true);
+        true
+    } else {
+        false
     }
 }
 
@@ -1691,16 +1651,18 @@ mod test {
             };
             let original = [11, 22];
             let copied = Rc::new(RefCell::new(Vec::new()));
+            let mut regions = vec![MemoryRegion::new_readonly(&original, ebpf::MM_RODATA_START)];
+            regions[0].cow_callback_payload = 0;
 
             let c = Rc::clone(&copied);
             let m = MemoryMapping::new_with_cow(
-                vec![MemoryRegion::new_cow(&original, ebpf::MM_RODATA_START, 42)],
+                regions,
+                &config,
+                SBPFVersion::V3,
                 Box::new(move |_| {
                     c.borrow_mut().extend_from_slice(&original);
                     Ok(c.borrow().as_slice().as_ptr() as u64)
                 }),
-                &config,
-                SBPFVersion::V3,
             )
             .unwrap();
 
@@ -1724,16 +1686,18 @@ mod test {
             };
             let original = [11, 22];
             let copied = Rc::new(RefCell::new(Vec::new()));
+            let mut regions = vec![MemoryRegion::new_readonly(&original, ebpf::MM_RODATA_START)];
+            regions[0].cow_callback_payload = 0;
 
             let c = Rc::clone(&copied);
             let m = MemoryMapping::new_with_cow(
-                vec![MemoryRegion::new_cow(&original, ebpf::MM_RODATA_START, 42)],
+                regions,
+                &config,
+                SBPFVersion::V3,
                 Box::new(move |_| {
                     c.borrow_mut().extend_from_slice(&original);
                     Ok(c.borrow().as_slice().as_ptr() as u64)
                 }),
-                &config,
-                SBPFVersion::V3,
             )
             .unwrap();
 
@@ -1764,21 +1728,24 @@ mod test {
             let original2 = [33, 44];
             let copied = Rc::new(RefCell::new(Vec::new()));
 
+            let mut regions = vec![
+                MemoryRegion::new_readonly(&original1, ebpf::MM_RODATA_START),
+                MemoryRegion::new_readonly(&original2, ebpf::MM_RODATA_START + 0x100000000),
+            ];
+            regions[0].cow_callback_payload = 42;
+
             let c = Rc::clone(&copied);
             let m = MemoryMapping::new_with_cow(
-                vec![
-                    MemoryRegion::new_cow(&original1, ebpf::MM_RODATA_START, 42),
-                    MemoryRegion::new_cow(&original2, ebpf::MM_RODATA_START + 0x100000000, 24),
-                ],
+                regions,
+                &config,
+                SBPFVersion::V3,
                 Box::new(move |id| {
-                    // check that the argument passed to MemoryRegion::new_cow is then passed to the
+                    // check that the argument passed to MemoryRegion::new_readonly is then passed to the
                     // callback
                     assert_eq!(id, 42);
                     c.borrow_mut().extend_from_slice(&original1);
                     Ok(c.borrow().as_slice().as_ptr() as u64)
                 }),
-                &config,
-                SBPFVersion::V3,
             )
             .unwrap();
 
@@ -1795,10 +1762,10 @@ mod test {
         let original = [11, 22];
 
         let m = MemoryMapping::new_with_cow(
-            vec![MemoryRegion::new_cow(&original, ebpf::MM_RODATA_START, 42)],
-            Box::new(|_| Err(())),
+            vec![MemoryRegion::new_readonly(&original, ebpf::MM_RODATA_START)],
             &config,
             SBPFVersion::V3,
+            Box::new(|_| Err(())),
         )
         .unwrap();
 
@@ -1812,10 +1779,10 @@ mod test {
         let original = [11, 22];
 
         let m = MemoryMapping::new_with_cow(
-            vec![MemoryRegion::new_cow(&original, ebpf::MM_RODATA_START, 42)],
-            Box::new(|_| Err(())),
+            vec![MemoryRegion::new_readonly(&original, ebpf::MM_RODATA_START)],
             &config,
             SBPFVersion::V3,
+            Box::new(|_| Err(())),
         )
         .unwrap();
 
