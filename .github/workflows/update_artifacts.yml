@@ -1,0 +1,63 @@
+name: Update artifacts
+
+on:
+  schedule:
+    - cron: "0 3 * * tue" # Tuesday at 3:00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: update-artifacts-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # smoelius: https://docs.github.com/en/rest/releases/releases#get-the-latest-release
+      - id: compare-tags
+        run: |
+          git clone https://github.com/anza-xyz/agave
+          pushd agave && git tag --list | tail -n 1 > ../agave_tag.txt && popd
+          if git diff --exit-code agave_tag.txt; then
+            exit 0
+          fi
+          echo -n "AGAVE_TAG=$(cat agave_tag.txt)" >> $GITHUB_ENV
+          echo 'tags-differ=true' >> $GITHUB_OUTPUT
+
+      - name: Rebuild artifacts
+        if: steps.compare-tags.outputs.tags-differ == 'true'
+        run: |
+          # smoelius: Install Agave prerequisites.
+          sudo apt update
+          sudo apt install libclang-dev libudev-dev llvm protobuf-compiler
+
+          # smoelius: Checkout Agave tag.
+          cd agave
+          git checkout "$AGAVE_TAG"
+
+          # smoelius: Patch Agave source. Note that `solana` is not used directly, but it is called
+          # by Anchor.
+          sed -i '/^\[patch\.crates-io\]$/a solana-sbpf = { git = "https://github.com/trail-of-forks/sbpf-coverage" }' Cargo.toml
+          sed -i '/^binArgs=()$/i BINS=(cargo-build-sbf solana-test-validator solana); DCOU_BINS=()' scripts/cargo-install-all.sh
+
+          # smoelius: Sanity check: files changed.
+          ! git diff --exit-code
+
+          # smoelius: Rebuild artifacts.
+          ./scripts/cargo-install-all.sh .
+
+          # Prepare for upload.
+          mkdir ../artifacts-${{ env.AGAVE_TAG }}
+          cp bin/cargo-build-sbf bin/solana bin/solana-test-validator ../artifacts-${{ env.AGAVE_TAG }}
+
+      - name: Upload artifacts
+        if: steps.compare-tags.outputs.tags-differ == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ env.AGAVE_TAG }}.zip
+          path: artifacts-${{ env.AGAVE_TAG }}
