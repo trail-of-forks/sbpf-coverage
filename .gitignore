@@ -1,4 +1,6 @@
 target
 .idea
 
+/agave
+/patched-agave-tools-*
 /sbf_trace_dir
