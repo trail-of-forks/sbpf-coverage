@@ -1,0 +1,51 @@
+name: Update artifacts
+
+on:
+  schedule:
+    - cron: "0 3 * * tue" # Tuesday at 3:00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: update-artifacts-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # smoelius: https://docs.github.com/en/rest/releases/releases#get-the-latest-release
+      - id: compare-tags
+        run: |
+          URL='https://api.github.com/repos/anza-xyz/agave/releases/latest'
+          curl -H "Accept: application/vnd.github+json" --silent --show-error "$URL" \
+            | jq -r .tag_name \
+            > agave_tag.txt
+          git diff --exit-code agave_tag.txt || exit 0
+          echo -n "AGAVE_TAG=$(cat agave_tag.txt)" >> $GITHUB_ENV
+          echo 'tags-differ=true' >> $GITHUB_OUTPUT
+
+      - name: Rebuild Solana artifacts
+        if: steps.compare-tags.tags-differ == 'true'
+        run: |
+          git clone https://github.com/anza-xyz/agave
+          cd agave
+          git checkout "$(cat agave_tag.txt)"
+
+          sed -i '/^\[patch\.crates-io\]$/a solana-sbpf = { git = "https://github.com/trail-of-forks/sbpf-coverage" }' Cargo.toml
+
+          # smoelius: `solana` is not used directly, but it is called by `anchor`.
+          sed -i '/^binArgs=()$/i BINS=(cargo-build-sbf solana-test-validator solana); DCOU_BINS=()' scripts/cargo-install-all.sh
+
+          ./scripts/cargo-install-all.sh .
+
+          mkdir artifacts
+          cp bin/cargo-build-sbf bin/solana bin/solana-test-validator artifacts
+
+      - name: Upload artifacts
+        if: steps.compare-tags.tags-differ == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ env.AGAVE_TAG }}.zip
+          path: artifacts
