@@ -79,14 +79,6 @@ fn main() {
                 .long("trace"),
         )
         .arg(
-            Arg::new("port")
-                .about("Port to use for the connection with a remote debugger")
-                .long("port")
-                .takes_value(true)
-                .value_name("PORT")
-                .default_value("9001"),
-        )
-        .arg(
             Arg::new("profile")
                 .about("Display profile using tracing instrumentation")
                 .short('p')
@@ -206,9 +198,6 @@ fn main() {
         _ => {}
     }
 
-    if matches.value_of("use").unwrap() == "debugger" {
-        vm.debug_port = Some(matches.value_of("port").unwrap().parse::<u16>().unwrap());
-    }
     let (instruction_count, result) =
         vm.execute_program(&executable, matches.value_of("use").unwrap() != "jit");
     println!("Result: {result:?}");

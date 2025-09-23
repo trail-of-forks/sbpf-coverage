@@ -338,7 +338,9 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
             call_frames: vec![CallFrame::default(); config.max_call_depth],
             loader,
             #[cfg(feature = "debugger")]
-            debug_port: None,
+            debug_port: std::env::var("VM_DEBUG_PORT")
+                .ok()
+                .and_then(|v| v.parse::<u16>().ok()),
         }
     }
 
