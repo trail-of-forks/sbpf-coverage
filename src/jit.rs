@@ -442,7 +442,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 self.emit_validate_instruction_count(Some(self.pc));
             }
 
-            if self.config.enable_instruction_tracing {
+            if self.config.enable_register_tracing {
                 self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, self.pc as i64));
                 self.emit_ins(X86Instruction::call_immediate(self.relative_to_anchor(ANCHOR_TRACE, 5)));
                 self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, 0));
@@ -1377,7 +1377,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
     fn emit_subroutines(&mut self) {
         // Routine for instruction tracing
-        if self.config.enable_instruction_tracing {
+        if self.config.enable_register_tracing {
             self.set_anchor(ANCHOR_TRACE);
             // Save registers on stack
             self.emit_ins(X86Instruction::push(REGISTER_SCRATCH, None));
@@ -1386,9 +1386,9 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             }
             self.emit_ins(X86Instruction::mov(OperandSize::S64, RSP, REGISTER_MAP[0]));
             self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, - 8 * 3, None)); // RSP -= 8 * 3;
-            self.emit_rust_call(Value::Constant64(C::trace as *const u8 as i64, false), &[
+            self.emit_rust_call(Value::Constant64(Vec::<crate::static_analysis::RegisterTraceEntry>::push as *const u8 as i64, false), &[
                 Argument { index: 1, value: Value::Register(REGISTER_MAP[0]) }, // registers
-                Argument { index: 0, value: Value::RegisterIndirect(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::ContextObjectPointer), false) },
+                Argument { index: 0, value: Value::RegisterPlusConstant32(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::RegisterTrace), false) },
             ], None);
             // Pop stack and return
             self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, 8 * 3, None)); // RSP += 8 * 3;
@@ -1478,7 +1478,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
         // Handler for EbpfError::UnsupportedInstruction
         self.set_anchor(ANCHOR_CALL_UNSUPPORTED_INSTRUCTION);
-        if self.config.enable_instruction_tracing {
+        if self.config.enable_register_tracing {
             self.emit_ins(X86Instruction::call_immediate(self.relative_to_anchor(ANCHOR_TRACE, 5)));
         }
         self.emit_set_exception_kind(EbpfError::UnsupportedInstruction);

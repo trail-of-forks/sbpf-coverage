@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 /// Register state recorded after executing one instruction
 ///
 /// The last register is the program counter (aka pc).
-pub type TraceLogEntry = [u64; 12];
+pub type RegisterTraceEntry = [u64; 12];
 
 /// Used for topological sort
 #[derive(PartialEq, Eq, Debug)]
@@ -127,8 +127,6 @@ impl Default for CfgNode {
 struct DummyContextObject {}
 
 impl ContextObject for DummyContextObject {
-    fn trace(&mut self, _state: [u64; 12]) {}
-
     fn consume(&mut self, _amount: u64) {}
 
     fn get_remaining(&self) -> u64 {
@@ -474,10 +472,10 @@ impl<'a> Analysis<'a> {
     }
 
     /// Use this method to print the trace log
-    pub fn disassemble_trace_log<W: std::io::Write>(
+    pub fn disassemble_register_trace<W: std::io::Write>(
         &self,
         output: &mut W,
-        trace_log: &[TraceLogEntry],
+        register_trace: &[RegisterTraceEntry],
     ) -> Result<(), std::io::Error> {
         let mut pc_to_insn_index = vec![
             0usize;
@@ -490,7 +488,7 @@ impl<'a> Analysis<'a> {
             pc_to_insn_index[insn.ptr] = index;
             pc_to_insn_index[insn.ptr + 1] = index;
         }
-        for (index, entry) in trace_log.iter().enumerate() {
+        for (index, entry) in register_trace.iter().enumerate() {
             let pc = entry[11] as usize;
             let insn = &self.instructions[pc_to_insn_index[pc]];
             writeln!(

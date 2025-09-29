@@ -87,7 +87,7 @@ fn main() {
         .get_matches();
 
     let loader = Arc::new(BuiltinProgram::new_loader(Config {
-        enable_instruction_tracing: matches.is_present("trace") || matches.is_present("profile"),
+        enable_register_tracing: matches.is_present("trace") || matches.is_present("profile"),
         enable_symbol_and_section_labels: true,
         ..Config::default()
     }));
@@ -208,14 +208,11 @@ fn main() {
         analysis
             .as_ref()
             .unwrap()
-            .disassemble_trace_log(&mut stdout.lock(), &vm.context_object_pointer.trace_log)
+            .disassemble_register_trace(&mut stdout.lock(), &vm.register_trace)
             .unwrap();
     }
     if matches.is_present("profile") {
-        let dynamic_analysis = DynamicAnalysis::new(
-            &vm.context_object_pointer.trace_log,
-            analysis.as_ref().unwrap(),
-        );
+        let dynamic_analysis = DynamicAnalysis::new(&vm.register_trace, analysis.as_ref().unwrap());
         let mut file = File::create("profile.dot").unwrap();
         analysis
             .as_ref()

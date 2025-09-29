@@ -30,9 +30,9 @@ use solana_sbpf::{
 };
 use std::{fs::File, io::Read, sync::Arc};
 use test_utils::{
-    assert_error, create_vm, syscalls, test_interpreter_and_jit, test_interpreter_and_jit_asm,
-    test_interpreter_and_jit_elf, test_syscall_asm, TestContextObject, PROG_TCP_PORT_80,
-    TCP_SACK_ASM, TCP_SACK_MATCH, TCP_SACK_NOMATCH,
+    assert_error, compare_register_trace, create_vm, syscalls, test_interpreter_and_jit,
+    test_interpreter_and_jit_asm, test_interpreter_and_jit_elf, test_syscall_asm,
+    TestContextObject, PROG_TCP_PORT_80, TCP_SACK_ASM, TCP_SACK_MATCH, TCP_SACK_NOMATCH,
 };
 
 // BPF_ALU32_LOAD : Arithmetic and Logic
@@ -3448,7 +3448,7 @@ fn execute_generated_program(prog: &[u8]) -> bool {
     let executable = Executable::<TestContextObject>::from_text_bytes(
         prog,
         Arc::new(BuiltinProgram::new_loader(Config {
-            enable_instruction_tracing: true,
+            enable_register_tracing: true,
             ..Config::default()
         })),
         SBPFVersion::V4,
@@ -3462,7 +3462,7 @@ fn execute_generated_program(prog: &[u8]) -> bool {
     if executable.verify::<RequisiteVerifier>().is_err() || executable.jit_compile().is_err() {
         return false;
     }
-    let (instruction_count_interpreter, tracer_interpreter, result_interpreter) = {
+    let (instruction_count_interpreter, trace_interpreter, result_interpreter) = {
         let mut mem = vec![0u8; mem_size];
         let mut context_object = TestContextObject::new(max_instruction_count);
         let mem_region = MemoryRegion::new_writable(&mut mem, ebpf::MM_INPUT_START);
@@ -3477,10 +3477,10 @@ fn execute_generated_program(prog: &[u8]) -> bool {
         );
         let (instruction_count_interpreter, result_interpreter) =
             vm.execute_program(&executable, true);
-        let tracer_interpreter = vm.context_object_pointer.clone();
+        let trace_interpreter = vm.register_trace.clone();
         (
             instruction_count_interpreter,
-            tracer_interpreter,
+            trace_interpreter,
             result_interpreter,
         )
     };
@@ -3497,9 +3497,10 @@ fn execute_generated_program(prog: &[u8]) -> bool {
         None
     );
     let (instruction_count_jit, result_jit) = vm.execute_program(&executable, false);
-    let tracer_jit = &vm.context_object_pointer;
+    let trace_jit = &vm.register_trace;
+    debug_assert!(!trace_interpreter.is_empty());
     if format!("{result_interpreter:?}") != format!("{result_jit:?}")
-        || !TestContextObject::compare_trace_log(&tracer_interpreter, tracer_jit)
+        || !compare_register_trace(&trace_interpreter, trace_jit)
     {
         let analysis =
             solana_sbpf::static_analysis::Analysis::from_executable(&executable).unwrap();
@@ -3507,10 +3508,10 @@ fn execute_generated_program(prog: &[u8]) -> bool {
         println!("result_jit={result_jit:?}");
         let stdout = std::io::stdout();
         analysis
-            .disassemble_trace_log(&mut stdout.lock(), &tracer_interpreter.trace_log)
+            .disassemble_register_trace(&mut stdout.lock(), &trace_interpreter)
             .unwrap();
         analysis
-            .disassemble_trace_log(&mut stdout.lock(), &tracer_jit.trace_log)
+            .disassemble_register_trace(&mut stdout.lock(), trace_jit)
             .unwrap();
         panic!();
     }

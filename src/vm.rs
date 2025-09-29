@@ -19,7 +19,7 @@ use crate::{
     interpreter::Interpreter,
     memory_region::MemoryMapping,
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
-    static_analysis::Analysis,
+    static_analysis::{Analysis, RegisterTraceEntry},
 };
 use std::{collections::BTreeMap, fmt::Debug};
 
@@ -68,7 +68,7 @@ pub struct Config {
     /// Enable instruction meter and limiting
     pub enable_instruction_meter: bool,
     /// Enable instruction tracing
-    pub enable_instruction_tracing: bool,
+    pub enable_register_tracing: bool,
     /// Enable dynamic string allocation for labels
     pub enable_symbol_and_section_labels: bool,
     /// Reject ELF files containing issues that the verifier did not catch before (up to v0.2.21)
@@ -103,7 +103,7 @@ impl Default for Config {
             enable_stack_frame_gaps: true,
             instruction_meter_checkpoint_distance: 10000,
             enable_instruction_meter: true,
-            enable_instruction_tracing: false,
+            enable_register_tracing: false,
             enable_symbol_and_section_labels: false,
             reject_broken_elfs: false,
             #[cfg(feature = "jit")]
@@ -138,8 +138,6 @@ impl<C: ContextObject> Executable<C> {
 
 /// Runtime context
 pub trait ContextObject {
-    /// Called for every instruction executed when tracing is enabled
-    fn trace(&mut self, state: [u64; 12]);
     /// Consume instructions from meter
     fn consume(&mut self, amount: u64);
     /// Get the number of remaining instructions allowed
@@ -156,13 +154,13 @@ pub struct DynamicAnalysis {
 
 impl DynamicAnalysis {
     /// Accumulates a trace
-    pub fn new(trace_log: &[[u64; 12]], analysis: &Analysis) -> Self {
+    pub fn new(register_trace: &[[u64; 12]], analysis: &Analysis) -> Self {
         let mut result = Self {
             edge_counter_max: 0,
             edges: BTreeMap::new(),
         };
         let mut last_basic_block = usize::MAX;
-        for traced_instruction in trace_log.iter() {
+        for traced_instruction in register_trace.iter() {
             let pc = traced_instruction[11] as usize;
             if analysis.cfg_nodes.contains_key(&pc) {
                 let counter = result
@@ -213,6 +211,8 @@ pub enum RuntimeEnvironmentSlot {
     ProgramResult = 19,
     /// [EbpfVm::memory_mapping]
     MemoryMapping = 27,
+    /// [EbpfVm::register_trace]
+    RegisterTrace = 54,
 }
 
 /// A virtual machine to run eBPF programs.
@@ -297,6 +297,8 @@ pub struct EbpfVm<'a, C: ContextObject> {
     pub call_frames: Vec<CallFrame>,
     /// Loader built-in program
     pub loader: Arc<BuiltinProgram<C>>,
+    /// Collector for the instruction trace
+    pub register_trace: Vec<RegisterTraceEntry>,
     /// TCP port for the debugger interface
     #[cfg(feature = "debugger")]
     pub debug_port: Option<u16>,
@@ -341,6 +343,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
             debug_port: std::env::var("VM_DEBUG_PORT")
                 .ok()
                 .and_then(|v| v.parse::<u16>().ok()),
+            register_trace: Vec::default(),
         }
     }
 
