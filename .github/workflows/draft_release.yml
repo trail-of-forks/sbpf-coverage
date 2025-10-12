@@ -1,0 +1,76 @@
+name: Draft release
+
+on:
+  schedule:
+    - cron: "0 3 * * *" # Everyday at 3:00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: draft-release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check-if-release-is-needed:
+    runs-on: [ubuntu-latest]
+    outputs:
+      agave-tag: steps.agave-tag.outputs.agave-tag
+    steps:
+      - name: Check if release is needed
+        id: check-if-release-is-needed
+        run: |
+          git clone https://github.com/anza-xyz/agave --depth 1
+          pushd agave && git pull --tag && git tag --list | tail -n 1 > ../agave_tag.txt && popd
+          echo -n "AGAVE_TAG=$(cat agave_tag.txt)" >> $GITHUB_ENV
+          if curl --head --fail --silent "https://github.com/trail-of-forks/sbpf-coverage/releases/tag/$AGAVE_TAG"; then
+            echo "agave-tag=$AGAVE_TAG" >> $GITHUB_OUTPUT
+          fi
+
+  build-patched-tools:
+    needs: [check-if-release-is-needed]
+    if: needs.check-if-release-is-needed.outputs.agave-tag != ''
+    runs-on: [ubuntu-latest, macos-latest]
+    steps:
+      # smoelius: A checkout is needed for the build_patched_tools.sh script.
+      - uses: actions/checkout@v5
+
+      - uses: actions/cache/restore@v4
+        id: cache-restore
+        with:
+          key: ${{ runner.os }}-agave-${{ hashFiles('agave/Cargo.lock') }}
+          path: agave
+
+      - name: Build patched tools
+        run: |
+          ./scripts/build_patched_tools.sh
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: patched-agave-tools-${{ env.AGAVE_TAG }}-${{ runner.os }}.zip
+          path: patched-agave-tools-${{ env.AGAVE_TAG }}
+
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          key: ${{ runner.os }}-agave-${{ hashFiles('agave/Cargo.lock') }}
+          path: agave
+
+  create-release:
+    needs: [build-patched-tools]
+    runs-on: [ubuntu-latest]
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: patched-agave-tools-*
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          # smoelius: A human is still required to publish the release.
+          draft: true
+          files: patched-agave-tools-*
+          token: ${{ secrets.REPO_TOKEN }}
