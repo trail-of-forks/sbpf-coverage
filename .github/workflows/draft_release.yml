@@ -21,7 +21,7 @@ jobs:
       - name: Check if release is needed
         id: agave-tag
         run: |
-          git clone https://github.com/anza-xyz/agave --depth 1
+          git clone https://github.com/anza-xyz/agave
           pushd agave && git pull --tag && git tag --list | tail -n 1 > ../agave_tag.txt && popd
           AGAVE_TAG="$(cat agave_tag.txt)"
           if ! curl --fail --silent "https://github.com/trail-of-forks/sbpf-coverage/releases/tag/$AGAVE_TAG"; then
