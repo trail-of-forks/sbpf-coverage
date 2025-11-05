@@ -13,8 +13,8 @@ OS="$(uname -s)"
 case "$OS" in
     Darwin)
         brew install coreutils gnu-sed protobuf
-        mkdir ~/lib
-        ln -s /Library/Developer/CommandLineTools/usr/lib/libclang.dylib ~/lib/libclang.dylib
+        mkdir ~/lib || true
+        ln -s /Library/Developer/CommandLineTools/usr/lib/libclang.dylib ~/lib/libclang.dylib || true
         export PATH="/opt/homebrew/opt/gnu-sed/libexec/gnubin:$PATH"
         ;;
     Linux)
@@ -30,7 +30,7 @@ esac
 git clone https://github.com/anza-xyz/agave || true
 cd agave
 git checkout .
-git pull --tag
+git fetch --tags
 git checkout "$AGAVE_TAG"
 rm -rf bin
 
