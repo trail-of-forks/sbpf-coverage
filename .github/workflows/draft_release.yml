@@ -1,8 +1,8 @@
 name: Draft release
 
 on:
-  schedule:
-    - cron: "0 3 * * *" # Everyday at 3:00 UTC
+  # schedule:
+  #   - cron: "0 3 * * *" # Everyday at 3:00 UTC
   workflow_dispatch:
 
 concurrency:
@@ -12,27 +12,28 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: write
+
 jobs:
-  check-if-release-is-needed:
+  read-agave-tag:
     runs-on: ubuntu-latest
     outputs:
       agave-tag: ${{ steps.agave-tag.outputs.agave-tag }}
     steps:
-      - name: Check if release is needed
+      - uses: actions/checkout@v5
+
+      - name: Read agave_tag.txt
         id: agave-tag
         run: |
-          git clone https://github.com/anza-xyz/agave
-          pushd agave && git fetch --tags && git tag --list | tail -n 1 > ../agave_tag.txt && popd
           AGAVE_TAG="$(cat agave_tag.txt)"
-          if ! curl --fail --silent "https://github.com/trail-of-forks/sbpf-coverage/releases/tag/$AGAVE_TAG"; then
-            echo "agave-tag=$AGAVE_TAG" >> $GITHUB_OUTPUT
-          fi
+          echo "agave-tag=$AGAVE_TAG" >> $GITHUB_OUTPUT
 
   build-patched-tools:
-    needs: [check-if-release-is-needed]
-    if: needs.check-if-release-is-needed.outputs.agave-tag != ''
+    needs: [read-agave-tag]
+    if: needs.read-agave-tag.outputs.agave-tag != ''
     env:
-      AGAVE_TAG: ${{ needs.check-if-release-is-needed.outputs.agave-tag }}
+      AGAVE_TAG: ${{ needs.read-agave-tag.outputs.agave-tag }}
     strategy:
       fail-fast: false
       matrix:
@@ -72,9 +73,9 @@ jobs:
             agave
 
   create-release:
-    needs: [check-if-release-is-needed, build-patched-tools]
+    needs: [read-agave-tag, build-patched-tools]
     env:
-      AGAVE_TAG: ${{ needs.check-if-release-is-needed.outputs.agave-tag }}
+      AGAVE_TAG: ${{ needs.read-agave-tag.outputs.agave-tag }}
     runs-on: ubuntu-latest
     steps:
       - name: Download artifacts
@@ -96,4 +97,4 @@ jobs:
           draft: true
           name: Patched Agave ${{ env.AGAVE_TAG }} tools
           files: patched-agave-tools-*.tar.gz
-          token: ${{ secrets.REPO_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
