@@ -13,7 +13,8 @@ OS="$(uname -s)"
 case "$OS" in
     Darwin)
         brew install coreutils gnu-sed protobuf
-        mkdir ~/lib
+        mkdir -p ~/lib
+        rm -f ~/lib/libclang.dylib
         ln -s /Library/Developer/CommandLineTools/usr/lib/libclang.dylib ~/lib/libclang.dylib
         export PATH="/opt/homebrew/opt/gnu-sed/libexec/gnubin:$PATH"
         ;;
@@ -25,6 +26,9 @@ case "$OS" in
         echo "unrecognized operating system: $OS" >&2
         ;;
 esac
+
+# smoelius: We must get the `sbpf-coverage` version before cding into the agave directory.
+VERSION="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
 
 # smoelius: Clone Agave, checkout tag, and prepare to build.
 git clone https://github.com/anza-xyz/agave || true
@@ -40,7 +44,7 @@ TOOLS=(cargo-build-sbf solana-test-validator solana)
 # smoelius: Patch Agave source. The last two lines eliminate some unnecessary building/rebuilding.
 # We do not build "dev-context-only-utils", which is why we get away with the first of those two
 # lines.
-sed -i '/^\[patch\.crates-io\]$/a solana-sbpf = { git = "https://github.com/trail-of-forks/sbpf-coverage" }' Cargo.toml
+sed -i "/^\[patch\.crates-io\]$/a solana-sbpf = { git = \"https://github.com/trail-of-forks/sbpf-coverage\", branch = \"v$VERSION\" }" Cargo.toml
 sed -i "/^binArgs=()$/i BINS=(${TOOLS[*]}); DCOU_BINS=()" scripts/cargo-install-all.sh
 sed -i '/^check_dcou() {$/a return 1' scripts/cargo-install-all.sh
 sed -i '/\<install\>.*\<spl-token-cli\>/s/.*/# &/' scripts/cargo-install-all.sh
